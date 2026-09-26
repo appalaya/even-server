@@ -1,0 +1,7 @@
+# SQLite side files and test caches (the repo root already ignores .venv/, *.db, __pycache__/)
+*.db-wal
+*.db-shm
+*.db-journal
+.pytest_cache/
+*.egg-info/
+build/

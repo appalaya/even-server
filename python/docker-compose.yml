@@ -1,0 +1,23 @@
+# Even sync server, Python reference. UNTESTED (see Dockerfile).
+# Run:    docker compose up -d --build
+# Block:  docker compose exec even even-server block <groupId>
+services:
+  even:
+    build: .
+    image: even-sync-server:local
+    restart: unless-stopped
+    environment:
+      # Only safe together with the loopback-only port below and a proxy that
+      # sets the header (Caddyfile.example does). Unset it if nothing sets it.
+      EVEN_TRUST_PROXY_HEADER: X-Forwarded-For
+      # EVEN_OPERATOR: "Your name"
+      # EVEN_TERMS_URL: "https://example.net/even-terms"
+      # EVEN_RETENTION_DAYS: "365"
+      # EVEN_DAILY_WRITE_BUDGET: "0"
+    ports:
+      - "127.0.0.1:8787:8787"   # host loopback only: HTTPS comes from Caddy or a tunnel in front
+    volumes:
+      - even-data:/data
+
+volumes:
+  even-data:

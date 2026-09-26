@@ -1,0 +1,49 @@
+# Caddy in front of the Even sync server: HTTPS with an automatic certificate.
+#
+# 1. Point your domain's DNS at this machine and let ports 80 and 443 reach it.
+# 2. Replace sync.example.net below, save as /etc/caddy/Caddyfile (or ./Caddyfile).
+# 3. Run the server with EVEN_TRUST_PROXY_HEADER=X-Forwarded-For, listening on
+#    127.0.0.1 (the default), then `caddy run` or `systemctl reload caddy`.
+
+sync.example.net {
+	reverse_proxy 127.0.0.1:8787 {
+		# Overwrite (never append to) X-Forwarded-For with the address Caddy saw,
+		# so the server's per-IP rate limits see real clients and cannot be fooled
+		# by a client-supplied header.
+		header_up X-Forwarded-For {remote_host}
+	}
+
+	# ACCESS LOG: Caddy writes none unless a `log` directive is present, and
+	# that is the right setting for Even. A `log` directive records every
+	# request URI, and Even's URIs contain group ids. If you must keep one,
+	# use this redacted form instead of a bare `log`:
+	#
+	# log {
+	# 	output file /var/log/caddy/even-access.log
+	# 	format filter {
+	# 		wrap json
+	# 		fields {
+	# 			request>uri delete
+	# 			request>headers>Authorization delete
+	# 			request>headers>X-Forwarded-For delete
+	# 			request>headers>Cf-Connecting-Ip delete
+	# 			request>remote_ip delete
+	# 			request>remote_port delete
+	# 			request>client_ip delete
+	# 		}
+	# 	}
+	# }
+	#
+	# Also leave Caddy's global `debug` option off: debug logs include URIs.
+}
+
+# Serving under a path instead, e.g. https://home.example.net/even (the path
+# becomes part of the server URL in invites)? Strip it before proxying:
+#
+# home.example.net {
+# 	handle_path /even/* {
+# 		reverse_proxy 127.0.0.1:8787 {
+# 			header_up X-Forwarded-For {remote_host}
+# 		}
+# 	}
+# }
