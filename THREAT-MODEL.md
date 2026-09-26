@@ -82,7 +82,7 @@ review protect.
 | Server disappears | Every device holds the full log. Any member issues a new invite naming a new server; members who accept it move over and re-push. The group file export needs no server at all. |
 | Downgrade to plaintext HTTP | Client refuses non-HTTPS server URLs and refuses invalid certificates. Not configurable. |
 | Landing page exfiltrates the fragment | The page is served with a strict Content Security Policy (no external scripts, no connections), no third-party or platform-injected scripts, and inserts the group name as text only. The page never sends the fragment anywhere. |
-| Plaintext reaches backups | The app writes no decrypted content to disk beyond each event's ordering timestamp and the group's name (which is also plaintext in the invite). Backups contain ciphertext, those two things, and, on iOS, the group secrets in the keychain. |
+| Plaintext reaches backups | The app writes no decrypted content to disk beyond each event's ordering timestamp, the group's name and currency (both also plaintext in the invite), and, while a server-copy delete is outstanding, that server's bearer token (which yields only a group id). Backups contain ciphertext, those things, and, on iOS, the group secrets in the keychain. |
 | Junk resurrects after takedown | An operator takedown is a blocklist entry answered with `410`, which clients treat as terminal and never self-heal. A plain delete would be undone by the next member who syncs. |
 
 ## Not defended, on purpose
