@@ -161,8 +161,10 @@ write creates a fresh row with a fresh epoch.
 
 ### Info (`GET /v1/info`)
 
-Static JSON assembled from configuration. No auth, no storage. Every enforced
-limit appears here, including the rate limits.
+Assembled from the `limits` table (seeded from configuration at deploy or
+start), so what is published is exactly what the triggers and handlers
+enforce. No auth. Every enforced limit appears here, including the rate
+limits and the daily write budget.
 
 ### Global write budget
 
@@ -261,8 +263,9 @@ group ids, no IPs.
 
 ## The Python reference (`python/`)
 
-- FastAPI + `sqlite3` from the standard library, one file.
-- `requirements.txt` pins `fastapi` and `uvicorn`.
+- FastAPI + `sqlite3` from the standard library, a small package.
+- **Python 3.14 or newer is required** (`requires-python = ">=3.14"` in
+  `pyproject.toml`); developed in a venv with pinned `requirements.txt`.
 - `Dockerfile` and a `docker-compose.yml` that mounts a volume for the database.
 - `README.md` walks through Caddy for HTTPS, because that is the step that
   costs self-hosters the most time, and through the proxy-header and

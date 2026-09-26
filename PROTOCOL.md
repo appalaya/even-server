@@ -103,7 +103,7 @@ independent clients interoperate.
 | Field | Type | Rule |
 |---|---|---|
 | `id` | string | base64url of 16 **random** bytes: exactly 22 characters, charset `[A-Za-z0-9_-]`. Not time-ordered, on purpose. Unique within a group; duplicates are ignored on write. |
-| `v` | integer | Envelope version. This document defines `1`. Servers reject unknown values with `unsupported_version`. |
+| `v` | integer | Envelope version, a **positive** integer (JSON number with no fractional part). This document defines `1`. Anything that is not a positive integer (`0`, negatives, fractions, strings, booleans) is a structural error (`invalid_envelope`); a positive integer the server does not support is `unsupported_version`. |
 | `n` | string | base64url of the 24-byte nonce: exactly 32 characters. |
 | `c` | string | base64url ciphertext. Decoded length at least 17 and at most `max_event_bytes` (default 8192). |
 
