@@ -19,6 +19,16 @@ from .limits import LimitsMissing
 
 log = logging.getLogger("even.main")
 
+# The uvicorn settings the logging invariant depends on (THREAT-MODEL.md, "What
+# we log"). The tests start their live server with these too.
+UVICORN_OPTIONS: dict[str, object] = {
+    "access_log": False,     # uvicorn's access log records the URL, which contains the group id
+    "ws": "none",            # no WebSockets: uvicorn logs every handshake with the client address and URL
+    "proxy_headers": False,  # client addresses come only from EVEN_TRUST_PROXY_HEADER
+    "server_header": False,
+    "log_config": None,      # keep the JSON logging configured by logs.configure()
+}
+
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -120,16 +130,10 @@ def serve(config: Config) -> int:
     app = create_app(config)
     expiry = ExpiryThread(app.state.store)
     expiry.start()
+    # uvicorn's own "running on" line loses its arguments in our log (see logs.JsonFormatter).
+    log.info("serve", extra={"fields": {"event": "serve", "host": config.host, "port": config.port}})
     try:
-        uvicorn.run(
-            app,
-            host=config.host,
-            port=config.port,
-            access_log=False,     # uvicorn's access log records the URL, which contains the group id
-            proxy_headers=False,  # client addresses come only from EVEN_TRUST_PROXY_HEADER
-            server_header=False,
-            log_config=None,      # keep the JSON logging configured above
-        )
+        uvicorn.run(app, host=config.host, port=config.port, **UVICORN_OPTIONS)  # type: ignore[arg-type]
     finally:
         expiry.stop()
     return 0

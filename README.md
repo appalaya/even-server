@@ -8,7 +8,7 @@ that moves client-encrypted events between phones. It never sees an expense.
 
 - **Protocol:** [`PROTOCOL.md`](PROTOCOL.md) — the complete contract. Anyone can implement it.
 - **Threat model:** [`THREAT-MODEL.md`](THREAT-MODEL.md) — what the server can and cannot know.
-- **Reference servers:** `worker/` (Cloudflare Workers + D1, what runs at sync.even.appalaya.com) and `python/` (single-file FastAPI + SQLite, for self-hosters).
+- **Reference servers:** `worker/` (Cloudflare Workers + D1, what runs at sync.even.appalaya.com) and `python/` (a small FastAPI + SQLite package, for self-hosters).
 - **Conformance suite:** `conformance/` — run it against any URL; passing it is what makes a server an Even server.
 
 ## Why a server at all
@@ -27,10 +27,11 @@ few pages.
 ## Self-hosting in short
 
 ```bash
-# Python reference
+# Python reference: Python 3.14 or newer
 cd python
-pip install -r requirements.txt
-EVEN_RETENTION_DAYS=365 python server.py          # listens on :8787
+python3.14 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt && pip install --no-deps -e .
+EVEN_RETENTION_DAYS=365 even-server               # or: python -m even_server; listens on 127.0.0.1:8787
 ```
 
 Put it behind HTTPS (Caddy gets a certificate for you; a Cloudflare Tunnel or
@@ -39,7 +40,7 @@ proxy sits in front, set `EVEN_TRUST_PROXY_HEADER` so rate limits see real
 client addresses, and turn off the proxy's access log or it will record group
 ids. Then create a group in the app and put your server URL in the "sync
 server" field, or move an existing group there from its settings. Full
-instructions live in `python/README.md` and `worker/README.md` once they exist.
+instructions live in `python/README.md` and `worker/README.md`.
 
 ## Project structure
 

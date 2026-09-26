@@ -42,6 +42,14 @@ export class GroupFull extends Error {
   }
 }
 
+/** The budget trigger aborted the batch (RAISE(ABORT, 'over_budget')); nothing was written. */
+export class OverBudget extends Error {
+  constructor() {
+    super('over_budget');
+    this.name = 'OverBudget';
+  }
+}
+
 const SELECT_LIMITS = 'SELECT key, value FROM limits';
 
 /**
@@ -82,8 +90,8 @@ export async function groupState(
 /**
  * Stores `envelopes` (already de-duplicated within the request) in one atomic batch (design.md, "Append"):
  * the day's write counter, the group row if it is new (`epoch` is used only then), one insert per envelope in
- * request order, and a final read of the group's epoch and highest seq. Throws GroupFull if the cap trigger fired;
- * the whole batch, counter included, is then rolled back.
+ * request order, and a final read of the group's epoch and highest seq. Throws OverBudget if the budget trigger fired
+ * on the counter, GroupFull if the cap trigger fired on an insert; either way the whole batch is rolled back.
  */
 export async function append(
   db: D1Database,
@@ -115,7 +123,8 @@ export async function append(
   try {
     results = await db.batch<Record<string, unknown>>(statements);
   } catch (error) {
-    if (isGroupFull(error)) throw new GroupFull();
+    if (abortedWith(error, 'over_budget')) throw new OverBudget();
+    if (abortedWith(error, 'group_full')) throw new GroupFull();
     throw error;
   }
   // One insert changed a row or it did not; the count excludes the AFTER trigger's UPDATE of groups.
@@ -127,9 +136,11 @@ export async function append(
   return { accepted, seq: typeof row.seq === 'number' ? row.seq : 0, epoch: row.epoch };
 }
 
-function isGroupFull(error: unknown): boolean {
+/** True if a trigger's RAISE(ABORT, reason) is what failed the batch (D1 wraps it; the message keeps the reason). */
+function abortedWith(error: unknown, reason: 'group_full' | 'over_budget'): boolean {
+  const pattern = new RegExp(`\\b${reason}\\b`);
   for (let e: unknown = error, depth = 0; e instanceof Error && depth < 5; e = e.cause, depth++) {
-    if (/\bgroup_full\b/.test(e.message)) return true;
+    if (pattern.test(e.message)) return true;
   }
   return false;
 }

@@ -86,20 +86,19 @@ cd conformance && EVEN_SERVER_URL=http://127.0.0.1:8787 npx vitest run
 ### Cloudflare Worker (`worker/`)
 
 The Worker reads the same `EVEN_*` names from `vars`, and `/v1/info` is built from the D1 `limits` table that is
-seeded from them. Set the test values in the Worker's vars, apply the schema and re-seed the limits against the
-**local** D1, then start the dev server:
+seeded from them. The test values above, and matching rate-limiter thresholds, are already declared in the `test`
+environment of `worker/wrangler.jsonc`, with its own local database. One script applies the schema, seeds the
+limits from that environment and starts the dev server:
 
 ```sh
 cd worker
-npm run db:schema && npm run db:seed      # local D1: tables, triggers, limits from vars
-npx wrangler dev --port 8787
+npm run dev:test          # = db:schema:test && db:seed:test && wrangler dev --env test --port 8787
 
 # in another shell
 cd conformance && EVEN_SERVER_URL=http://127.0.0.1:8787 npx vitest run
 ```
 
-The rate limiters are Workers Rate Limiting bindings whose thresholds are declared next to the vars. Raise those
-too for test runs. See `worker/README.md` for the exact script names and where the test values go.
+See `worker/README.md` ("Running the conformance suite") for why this is an environment rather than `--var` flags.
 
 ### The blocked-group test
 
@@ -109,9 +108,9 @@ It sends a valid token, so the result does not depend on whether a server checks
 ```sh
 EVEN_SERVER_URL=http://127.0.0.1:8787 npm run --silent blocked-id     # prints the group id for this URL
 # block that id on the server:
-#   Python:  .venv/bin/even-server --db /tmp/even-conformance.db block <id>
-#   Worker:  npx wrangler d1 execute <DB> --local --command \
-#              "INSERT INTO blocked (group_id, blocked_at) VALUES ('<id>', 0)"
+#   Python:  ../python/.venv/bin/even-server --db /tmp/even-conformance.db block <id>
+#   Worker:  (cd ../worker && npx wrangler d1 execute even-test --local --env test --command \
+#              "INSERT OR IGNORE INTO blocked (group_id, blocked_at) VALUES ('<id>', 0)")
 EVEN_SERVER_URL=http://127.0.0.1:8787 EVEN_CONFORMANCE_BLOCKED_GROUP_ID=<id> npx vitest run
 ```
 

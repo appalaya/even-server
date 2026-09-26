@@ -107,7 +107,6 @@ def create_app(config: Config, *, store: Store | None = None, limiter: RateLimit
                 epoch=new_epoch(),
                 now_ms=now_ms,
                 day=now.date().isoformat(),
-                budget=limits.daily_write_budget,
             )
         except GroupFull as full:
             limit = limits.max_group_bytes if full.reason == "bytes" else limits.max_group_events

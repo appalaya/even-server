@@ -37,11 +37,14 @@ class Limits:
 
     @classmethod
     def from_rows(cls, rows: Iterable[tuple[str, int]]) -> Limits:
+        """Every limit from the table. A row that is missing, or is not a
+        non-negative integer, fails closed, as in the Worker."""
         values = dict(rows)
-        missing = [f.name for f in fields(cls) if f.name not in values]
+        missing = [f.name for f in fields(cls)
+                   if type(values.get(f.name)) is not int or values[f.name] < 0]
         if missing:
-            raise LimitsMissing(f"limits table is missing: {', '.join(missing)}")
-        return cls(**{f.name: int(values[f.name]) for f in fields(cls)})
+            raise LimitsMissing(f"limits table is missing or invalid: {', '.join(missing)}")
+        return cls(**{f.name: values[f.name] for f in fields(cls)})
 
     @property
     def max_body_bytes(self) -> int:
