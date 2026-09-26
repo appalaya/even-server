@@ -31,6 +31,10 @@ MALFORMED = {
     "v string": _replace("v", "1"),
     "v bool": _replace("v", True),
     "v fraction": _replace("v", 1.5),
+    "v zero": _replace("v", 0),
+    "v zero float": _replace("v", 0.0),
+    "v negative": _replace("v", -1),
+    "v negative float": _replace("v", -2.0),
     "v null": _replace("v", None),
     "v list": _replace("v", [1]),
     "n 31 chars": _replace("n", "A" * 31),
@@ -68,14 +72,22 @@ def test_ciphertext_bounds_are_inclusive(client, size):
     assert client.post(group.events, json=batch(envelope(size=size)), headers=group.headers).status_code == 200
 
 
-@pytest.mark.parametrize("version", [0, 2, -1, 2**70])
+@pytest.mark.parametrize("version", [2, 3, 2.0, 2**70])
 def test_unsupported_version_is_415_with_index(client, version):
+    """Only a positive integer the server does not support is 415; 0 and
+    negatives are structural (see MALFORMED)."""
     group = new_group()
     response = client.post(group.events, json=batch(envelope(), envelope(v=version)), headers=group.headers)
     assert response.status_code == 415
     assert response.json()["error"] == "unsupported_version"
     assert response.json()["index"] == 1
     assert client.get(group.events, headers=group.headers).json()["epoch"] is None
+
+
+def test_non_positive_version_is_structural_even_before_a_415(client):
+    group = new_group()
+    response = client.post(group.events, json=batch(envelope(v=2), envelope(v=0)), headers=group.headers)
+    assert (response.status_code, response.json()["error"], response.json()["index"]) == (400, "invalid_envelope", 1)
 
 
 def test_structural_error_takes_precedence_over_version_error(client):
