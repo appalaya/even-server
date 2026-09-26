@@ -1,0 +1,32 @@
+{
+  "name": "even-worker",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Even sync server: Cloudflare Workers + D1 reference implementation of PROTOCOL.md.",
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "dev": "wrangler dev --port 8787",
+    "dev:test": "npm run db:schema:test && npm run db:seed:test && wrangler dev --env test --port 8787",
+    "db:schema": "wrangler d1 execute even --local --file schema.sql",
+    "db:seed": "node scripts/seed-limits.mjs && wrangler d1 execute even --local --file seed-limits.sql",
+    "db:schema:test": "wrangler d1 execute even-test --local --env test --file schema.sql",
+    "db:seed:test": "node scripts/seed-limits.mjs --env test && wrangler d1 execute even-test --local --env test --file seed-limits.sql",
+    "db:schema:remote": "wrangler d1 execute even --remote --yes --file schema.sql",
+    "db:seed:remote": "node scripts/seed-limits.mjs && wrangler d1 execute even --remote --yes --file seed-limits.sql",
+    "deploy": "wrangler deploy",
+    "typecheck": "tsc --noEmit -p . && tsc --noEmit -p test",
+    "test": "vitest run",
+    "conformance": "cd ../conformance && EVEN_SERVER_URL=http://127.0.0.1:8787 npx vitest run"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "^0.22.0",
+    "@cloudflare/workers-types": "^5.20260926.1",
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.11",
+    "wrangler": "^4.141.0"
+  }
+}

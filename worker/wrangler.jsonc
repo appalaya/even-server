@@ -1,0 +1,84 @@
+// Even sync server — Cloudflare Workers + D1 reference (see README.md).
+//
+// Every limit is a var below with its design.md default. The vars are NOT read by the Worker at request time:
+// `npm run db:seed` copies them into the D1 `limits` table, and /v1/info and every check read that table, so what is
+// published is what is enforced. After changing a var, re-seed (README.md, "Changing a limit").
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "even-sync",
+  "main": "src/index.ts",
+  // The newest date the workerd bundled with @cloudflare/vitest-pool-workers supports, so tests, `wrangler dev` and
+  // production run the same date. Nothing here depends on a newer flag.
+  "compatibility_date": "2026-08-22",
+
+  // Privacy (THREAT-MODEL.md, "What we log"): request URLs contain group ids, so nothing that records them is on.
+  // The Worker's own console.log lines (method, route pattern, status, ms, limited) are kept; invocation logs, which
+  // record the URL, are off; traces and Logpush, which record it too, are off.
+  "observability": {
+    "enabled": true,
+    "logs": { "enabled": true, "invocation_logs": false },
+    "traces": { "enabled": false }
+  },
+  "logpush": false,
+
+  // `wrangler d1 create even` prints the database_id to paste here before the first deploy.
+  // Local development (`--local`, `wrangler dev`) needs no id.
+  "d1_databases": [{ "binding": "DB", "database_name": "even" }],
+
+  // Per-IP limiters (design.md, "Rate limiting"). Each `limit` MUST equal its EVEN_RATE_* var below; the seed script
+  // checks this and refuses to seed otherwise. namespace_id is any integer string unique within the account.
+  "ratelimits": [
+    { "name": "RATE_REQUESTS", "namespace_id": "4101", "simple": { "limit": 120, "period": 60 } },
+    { "name": "RATE_WRITES", "namespace_id": "4102", "simple": { "limit": 60, "period": 60 } },
+    { "name": "RATE_CREATES", "namespace_id": "4103", "simple": { "limit": 3, "period": 60 } }
+  ],
+
+  // Idle-group expiry (design.md, "Expiry"), once a day.
+  "triggers": { "crons": ["17 3 * * *"] },
+
+  "vars": {
+    "EVEN_MAX_EVENT_BYTES": "8192",
+    "EVEN_MAX_GROUP_BYTES": "2097152",
+    "EVEN_MAX_GROUP_EVENTS": "10000",
+    "EVEN_MAX_BATCH": "25",
+    "EVEN_MAX_PAGE": "500",
+    "EVEN_RETENTION_DAYS": "365",
+    "EVEN_RATE_REQUESTS_PER_MINUTE": "120",
+    "EVEN_RATE_WRITES_PER_MINUTE": "60",
+    "EVEN_RATE_GROUP_CREATES_PER_MINUTE": "3",
+    "EVEN_DAILY_WRITE_BUDGET": "0",
+    // Optional strings shown to users in /v1/info; empty means unset.
+    "EVEN_OPERATOR": "",
+    "EVEN_TERMS_URL": ""
+  },
+
+  "env": {
+    // Test limits for the conformance suite (conformance/README.md): `npm run dev:test`.
+    // Vars, D1 and rate limiters are not inherited by named environments, so all three are spelled out.
+    "test": {
+      // Its own local database, so conformance runs never touch the development data. The explicit id matters:
+      // without one, local D1 files are keyed by binding name and both environments would share a file. To deploy
+      // this environment as staging, replace it with the id printed by `wrangler d1 create even-test`.
+      "d1_databases": [{ "binding": "DB", "database_name": "even-test", "database_id": "local-even-test" }],
+      "ratelimits": [
+        { "name": "RATE_REQUESTS", "namespace_id": "4901", "simple": { "limit": 100000, "period": 60 } },
+        { "name": "RATE_WRITES", "namespace_id": "4902", "simple": { "limit": 100000, "period": 60 } },
+        { "name": "RATE_CREATES", "namespace_id": "4903", "simple": { "limit": 100000, "period": 60 } }
+      ],
+      "vars": {
+        "EVEN_MAX_EVENT_BYTES": "8192",
+        "EVEN_MAX_GROUP_BYTES": "65536",
+        "EVEN_MAX_GROUP_EVENTS": "200",
+        "EVEN_MAX_BATCH": "25",
+        "EVEN_MAX_PAGE": "50",
+        "EVEN_RETENTION_DAYS": "365",
+        "EVEN_RATE_REQUESTS_PER_MINUTE": "100000",
+        "EVEN_RATE_WRITES_PER_MINUTE": "100000",
+        "EVEN_RATE_GROUP_CREATES_PER_MINUTE": "100000",
+        "EVEN_DAILY_WRITE_BUDGET": "0",
+        "EVEN_OPERATOR": "",
+        "EVEN_TERMS_URL": ""
+      }
+    }
+  }
+}
