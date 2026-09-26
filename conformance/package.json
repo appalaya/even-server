@@ -1,0 +1,23 @@
+{
+  "name": "even-conformance",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Protocol conformance suite for Even sync servers. Passing it is the definition of an Even server (PROTOCOL.md §12).",
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "blocked-id": "node src/blocked-id.ts"
+  },
+  "devDependencies": {
+    "@noble/ciphers": "^2.4.0",
+    "@noble/hashes": "^2.4.0",
+    "@types/node": "^26.6.3",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.2"
+  }
+}
