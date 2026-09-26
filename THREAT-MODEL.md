@@ -153,7 +153,7 @@ therefore be misused to store or relay content we cannot see. We do not try to
 inspect content, because we cannot without breaking the core promise. We make
 the store a poor one instead:
 
-- Event cap 8 KB, group cap 2 MB and 20,000 events, idle expiry after 12 months.
+- Event cap 8 KB, group cap 2 MB and 10,000 events, idle expiry after 12 months.
 - Per IP: requests per minute, a lower write-requests-per-minute limit, and
   group creations per minute. IPv6 keyed by /64.
 - A global daily write budget on the public server; past it, writes return
