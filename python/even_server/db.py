@@ -1,0 +1,231 @@
+"""SQLite storage (design.md, "Storage model"). Caps and group accounting are
+enforced by the triggers in schema.sql; nothing here sums bytes.
+
+Every operation opens its own short-lived connection, so the store is safe to
+call from any thread. Writes run under `BEGIN IMMEDIATE`, which takes SQLite's
+write lock before the first `MAX(seq)` read, so two appends to one group never
+interleave. An in-process lock queues writers from this process fairly instead
+of leaving them to SQLite's busy-wait; the SQLite lock still covers other
+processes (for example `even-server block` run from a shell).
+"""
+
+import sqlite3
+import threading
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
+from dataclasses import dataclass
+from importlib.resources import files
+from typing import Any
+
+from .envelope import Envelope
+from .limits import Limits
+
+SCHEMA = files(__package__).joinpath("schema.sql").read_text("utf-8")
+
+INSERT_EVENT = """
+INSERT OR IGNORE INTO events (group_id, seq, id, v, n, c, size, created_at)
+  SELECT ?, COALESCE(MAX(seq), 0) + 1, ?, ?, ?, ?, ?, ? FROM events WHERE group_id = ?
+"""
+
+
+class GroupFull(Exception):
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason  # "bytes" | "events"
+
+
+class OverBudget(Exception):
+    pass
+
+
+@dataclass(frozen=True, slots=True)
+class GroupState:
+    limits: Limits
+    blocked: bool
+    exists: bool
+
+
+@dataclass(frozen=True, slots=True)
+class AppendResult:
+    accepted: int
+    seq: int
+    epoch: str
+
+
+@dataclass(frozen=True, slots=True)
+class Page:
+    events: list[dict[str, Any]]
+    more: bool
+    epoch: str | None
+
+
+class Store:
+    def __init__(self, path: str) -> None:
+        self.path = path
+        self._write_lock = threading.Lock()
+
+    # -- plumbing ---------------------------------------------------------
+
+    @contextmanager
+    def _connect(self) -> Iterator[sqlite3.Connection]:
+        conn = sqlite3.connect(self.path, timeout=30.0, autocommit=True)
+        try:
+            # FULL, not NORMAL: an acknowledged write that vanished after a power
+            # cut would never be re-pushed, because the epoch would not change.
+            conn.execute("PRAGMA synchronous = FULL")
+            yield conn
+        finally:
+            conn.close()
+
+    @contextmanager
+    def _write(self) -> Iterator[sqlite3.Connection]:
+        """A connection inside `BEGIN IMMEDIATE`; commits on success, rolls back on error."""
+        with self._write_lock, self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                yield conn
+            except BaseException:
+                if conn.in_transaction:
+                    conn.execute("ROLLBACK")
+                raise
+            conn.execute("COMMIT")
+
+    @contextmanager
+    def _snapshot(self) -> Iterator[sqlite3.Connection]:
+        """A connection inside a read transaction: one consistent snapshot."""
+        with self._connect() as conn:
+            conn.execute("BEGIN")
+            try:
+                yield conn
+            finally:
+                if conn.in_transaction:
+                    conn.execute("ROLLBACK")
+
+    @staticmethod
+    def _limits(conn: sqlite3.Connection) -> Limits:
+        return Limits.from_rows(conn.execute("SELECT key, value FROM limits"))
+
+    # -- setup ------------------------------------------------------------
+
+    def init(self) -> None:
+        with self._connect() as conn:
+            conn.execute("PRAGMA journal_mode = WAL")
+            conn.executescript(SCHEMA)
+
+    def seed_limits(self, limits: Limits) -> None:
+        with self._write() as conn:
+            conn.executemany(
+                "INSERT INTO limits (key, value) VALUES (?, ?)"
+                " ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+                limits.rows(),
+            )
+
+    # -- requests ---------------------------------------------------------
+
+    def limits(self) -> Limits:
+        with self._connect() as conn:
+            return self._limits(conn)
+
+    def group_state(self, group_id: str) -> GroupState:
+        with self._snapshot() as conn:
+            return GroupState(
+                limits=self._limits(conn),
+                blocked=conn.execute("SELECT 1 FROM blocked WHERE group_id = ?", (group_id,)).fetchone() is not None,
+                exists=conn.execute("SELECT 1 FROM groups WHERE id = ?", (group_id,)).fetchone() is not None,
+            )
+
+    def append(
+        self,
+        group_id: str,
+        envelopes: Sequence[Envelope],
+        *,
+        epoch: str,
+        now_ms: int,
+        day: str,
+        budget: int,
+    ) -> AppendResult:
+        """Store `envelopes` (already de-duplicated within the request) atomically.
+
+        `epoch` is used only if this write creates the group. Raises `OverBudget`
+        or `GroupFull`; either way nothing is stored and the counter is not bumped.
+        """
+        with self._write() as conn:
+            [(writes,)] = conn.execute(
+                "INSERT INTO counters (day, writes) VALUES (?, 1)"
+                " ON CONFLICT (day) DO UPDATE SET writes = writes + 1 RETURNING writes",
+                (day,),
+            ).fetchall()
+            if budget > 0 and writes > budget:
+                raise OverBudget()
+            conn.execute(
+                "INSERT OR IGNORE INTO groups (id, epoch, created_at, last_write_at) VALUES (?, ?, ?, ?)",
+                (group_id, epoch, now_ms, now_ms),
+            )
+            accepted = 0
+            for e in envelopes:
+                try:
+                    cursor = conn.execute(INSERT_EVENT, (group_id, e.id, e.v, e.n, e.c, e.size, now_ms, group_id))
+                except (sqlite3.IntegrityError, sqlite3.OperationalError) as exc:
+                    if "group_full" not in str(exc):
+                        raise
+                    raise GroupFull(self._full_reason(conn, group_id, e.size)) from None
+                accepted += cursor.rowcount  # 1 inserted, 0 ignored as a duplicate
+            epoch_now, seq = conn.execute(
+                "SELECT epoch, (SELECT MAX(seq) FROM events WHERE group_id = ?) FROM groups WHERE id = ?",
+                (group_id, group_id),
+            ).fetchone()
+        return AppendResult(accepted=accepted, seq=seq or 0, epoch=epoch_now)
+
+    @staticmethod
+    def _full_reason(conn: sqlite3.Connection, group_id: str, size: int) -> str:
+        """Which cap the trigger hit. RAISE(ABORT) undoes only the failing
+        statement, so the transaction is still open and the row is current."""
+        used = conn.execute("SELECT bytes FROM groups WHERE id = ?", (group_id,)).fetchone()[0]
+        cap = conn.execute("SELECT value FROM limits WHERE key = 'max_group_bytes'").fetchone()
+        return "bytes" if cap is None or used + size > cap[0] else "events"
+
+    def read(self, group_id: str, since: int, limit: int) -> Page:
+        with self._snapshot() as conn:
+            row = conn.execute("SELECT epoch FROM groups WHERE id = ?", (group_id,)).fetchone()
+            if row is None:
+                return Page(events=[], more=False, epoch=None)
+            rows = conn.execute(
+                "SELECT seq, id, v, n, c FROM events WHERE group_id = ? AND seq > ? ORDER BY seq LIMIT ?",
+                (group_id, since, limit + 1),
+            ).fetchall()
+        events = [{"seq": seq, "id": id_, "v": v, "n": n, "c": c} for seq, id_, v, n, c in rows[:limit]]
+        return Page(events=events, more=len(rows) > limit, epoch=row[0])
+
+    def delete(self, group_id: str) -> None:
+        with self._write() as conn:
+            conn.execute("DELETE FROM events WHERE group_id = ?", (group_id,))
+            conn.execute("DELETE FROM groups WHERE id = ?", (group_id,))
+
+    # -- operator ---------------------------------------------------------
+
+    def block(self, group_id: str, now_ms: int, *, purge: bool = False) -> bool:
+        """Add to the blocklist. Returns False if it was already blocked."""
+        with self._write() as conn:
+            added = conn.execute(
+                "INSERT OR IGNORE INTO blocked (group_id, blocked_at) VALUES (?, ?)", (group_id, now_ms)
+            ).rowcount
+            if purge:
+                conn.execute("DELETE FROM events WHERE group_id = ?", (group_id,))
+                conn.execute("DELETE FROM groups WHERE id = ?", (group_id,))
+        return added == 1
+
+    def unblock(self, group_id: str) -> bool:
+        with self._write() as conn:
+            return conn.execute("DELETE FROM blocked WHERE group_id = ?", (group_id,)).rowcount == 1
+
+    def expire(self, cutoff_ms: int, *, counters_before: str) -> int:
+        """Delete groups (and their events) with no write since `cutoff_ms`, and
+        daily counters older than `counters_before`. Returns groups deleted."""
+        with self._write() as conn:
+            conn.execute(
+                "DELETE FROM events WHERE group_id IN (SELECT id FROM groups WHERE last_write_at < ?)",
+                (cutoff_ms,),
+            )
+            deleted = conn.execute("DELETE FROM groups WHERE last_write_at < ?", (cutoff_ms,)).rowcount
+            conn.execute("DELETE FROM counters WHERE day < ?", (counters_before,))
+        return deleted
