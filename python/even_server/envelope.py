@@ -84,9 +84,9 @@ def _structural(raw: object, max_event_bytes: int) -> Envelope:
     id_, v, n, c = raw["id"], raw["v"], raw["n"], raw["c"]
     if not b64.is_b64url(id_, ID_LENGTH):
         raise _Malformed(f"id must be {ID_LENGTH} base64url characters")
-    version = _integer(v)
+    version = _positive_integer(v)
     if version is None:
-        raise _Malformed("v must be an integer")
+        raise _Malformed("v must be a positive integer")
     if not b64.is_b64url(n, NONCE_LENGTH):
         raise _Malformed(f"n must be {NONCE_LENGTH} base64url characters")
     if not isinstance(c, str):
@@ -103,16 +103,17 @@ def _structural(raw: object, max_event_bytes: int) -> Envelope:
     return Envelope(id=id_, v=version, n=n, c=c, size=length + STORED_OVERHEAD)
 
 
-def _integer(value: object) -> int | None:
-    """JSON integer -> int. Booleans are not integers. An integral float such as
-    `1.0` is the same JSON number as `1` (it is to every JavaScript client), so
-    it is accepted and normalised."""
+def _positive_integer(value: object) -> int | None:
+    """JSON positive integer -> int (PROTOCOL.md section 4). Booleans are not
+    integers; 0, negatives and fractions are structural errors. An integral
+    float such as `1.0` is the same JSON number as `1` (it is to every
+    JavaScript client), so it is accepted and normalised."""
     match value:
         case bool():
             return None
-        case int():
+        case int() if value >= 1:
             return value
-        case float() if math.isfinite(value) and value.is_integer():
+        case float() if math.isfinite(value) and value.is_integer() and value >= 1:
             return int(value)
         case _:
             return None
