@@ -1,8 +1,12 @@
 import sqlite3
 import time
+from concurrent.futures import ThreadPoolExecutor
+from datetime import UTC, datetime
 
 import pytest
 
+from even_server.db import OverBudget
+from even_server.envelope import Envelope
 from even_server.expiry import DAY_MS, expire_once
 from even_server.main import main
 from support import batch, envelope, new_group, read_all
@@ -102,6 +106,47 @@ def test_daily_write_budget(make_client):
     assert read.status_code == 200 and len(read.json()["events"]) == 2
     with sqlite3.connect(client.app.state.store.path) as db:
         assert db.execute("SELECT writes FROM counters").fetchone() == (2,)
+
+
+def test_budget_trigger_refuses_the_increment_and_fails_closed_without_its_row(client):
+    bump = ("INSERT INTO counters (day, writes) VALUES ('1999-12-31', 1)"
+            " ON CONFLICT (day) DO UPDATE SET writes = writes + 1")
+    db = sqlite3.connect(client.app.state.store.path, autocommit=True)
+    try:
+        db.execute("UPDATE limits SET value = 2 WHERE key = 'daily_write_budget'")
+        db.execute(bump)
+        db.execute(bump)
+        with pytest.raises(sqlite3.IntegrityError, match="over_budget"):
+            db.execute(bump)
+        db.execute("UPDATE limits SET value = 0 WHERE key = 'daily_write_budget'")
+        db.execute(bump)  # 0 means no budget
+        db.execute("DELETE FROM limits WHERE key = 'daily_write_budget'")
+        with pytest.raises(sqlite3.IntegrityError, match="over_budget"):
+            db.execute(bump)
+    finally:
+        db.close()
+
+
+def test_daily_write_budget_is_exact_under_concurrency(make_client):
+    client = make_client(EVEN_DAILY_WRITE_BUDGET=3)
+    store = client.app.state.store
+    day = datetime.now(UTC).date().isoformat()
+
+    def attempt(_: int) -> str:
+        e = envelope()
+        try:
+            store.append(new_group().id, [Envelope(id=e["id"], v=1, n=e["n"], c=e["c"], size=320)],
+                         epoch="E" * 22, now_ms=time.time_ns() // 1_000_000, day=day)
+            return "stored"
+        except OverBudget:
+            return "over_budget"
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        results = sorted(pool.map(attempt, range(8)))
+    assert results == ["over_budget"] * 5 + ["stored"] * 3
+    with sqlite3.connect(store.path) as db:
+        assert db.execute("SELECT writes FROM counters WHERE day = ?", (day,)).fetchone() == (3,)
+        assert db.execute("SELECT COUNT(*) FROM groups").fetchone() == (3,)
 
 
 def test_writes_are_counted_even_without_a_budget(client):

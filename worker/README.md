@@ -9,7 +9,7 @@ No framework and no runtime dependencies. Dev dependencies are `wrangler`, `type
 
 ```
 wrangler.jsonc          D1 binding, three rate limiters, cron, EVEN_* vars, observability (invocation logs off)
-schema.sql              tables and the two cap/accounting triggers (design.md, "Storage model")
+schema.sql              tables and the cap, accounting and daily-budget triggers (design.md, "Storage model")
 scripts/seed-limits.mjs vars → seed-limits.sql (the `limits` table); refuses bad values and limiter mismatches
 src/index.ts            fetch (route, handle, headers, one log line) and scheduled (expiry)
 src/routes.ts           routing, the request prelude, and the §6 handlers
@@ -36,7 +36,8 @@ npm run dev                             # http://127.0.0.1:8787 with the product
 
 `npm run typecheck` checks `src/` and `test/` (TypeScript strict). `npm test` runs the Worker's own tests inside
 workerd through `@cloudflare/vitest-pool-workers`, against an in-memory D1 with `schema.sql` applied: the round trip,
-the triggers (including fail-closed when a cap row is missing), the daily budget, the blocklist, the rate-limit paths
+the triggers (including fail-closed when a cap row is missing), the daily budget (exact under concurrent appends),
+the blocklist, the rate-limit paths
 (with fake bindings), the log lines, and expiry. The conformance suite remains the definition of correctness.
 
 ### Smoke test
@@ -161,6 +162,9 @@ npm run db:seed:remote               # the limits table, from the top-level vars
 npm run deploy
 ```
 
+After pulling a change to `schema.sql` (for example a new trigger), run `npm run db:schema:remote` again before
+deploying: every statement is `IF NOT EXISTS`, so it adds what is missing and leaves data alone.
+
 Then add the custom domain (`sync.even.appalaya.com`) to the Worker in the dashboard, and for the public server set
 `EVEN_DAILY_WRITE_BUDGET`, `EVEN_OPERATOR` and `EVEN_TERMS_URL` (then re-seed and deploy). Each `ratelimits`
 `namespace_id` must be unique within the account; change them if another Worker already uses 4101–4103.
@@ -212,9 +216,10 @@ the log shows `{"level":"info","event":"expiry","groups_deleted":…,"retention_
   `ratelimit_binding_failed` once per isolate, so a self-deployed Worker without the bindings still works.
 - The daily write budget counts append requests per UTC day in `counters`, incremented inside the append batch
   (rolled back with it on `413`). Past the budget, appends get `503 over_budget` with `Retry-After` until UTC
-  midnight; reads continue. The check uses the count read at the start of the request, so concurrent appends at the
-  boundary can overshoot by the number in flight. For a quota guard that is immaterial; the per-group caps, by
-  contrast, are exact because the trigger enforces them inside the batch.
+  midnight; reads continue. The `counters_budget` trigger refuses the increment inside the batch, so the budget is
+  exact however many appends are in flight, like the per-group caps. The handler also checks the count it read at
+  the start of the request, which only answers early once the day is spent (and keeps the budget approximately
+  enforced on a database whose schema predates the trigger).
 
 ## Logging and privacy
 
@@ -242,5 +247,7 @@ server's terms (PROTOCOL.md §9):
 - **D1 in production**: network latency, the per-invocation query limit and CPU limits of the plan. The batch shapes
   are the same as locally; the note on `EVEN_MAX_BATCH` above is the one limit that interacts with them.
 - **Observability settings.** That invocation logs, traces and Logpush stay off can only be checked in the dashboard
-  after a deploy.
+  after a deploy. Check there too that the Worker's own log events carry no request URL in the metadata Workers Logs
+  attaches to them (Cloudflare's documentation does not say either way); if one does, set
+  `observability.logs.enabled` to `false` and rely on `wrangler tail` for live debugging.
 - **Deploy itself**, the custom domain, and `database_id` / `namespace_id` values, which need an account.

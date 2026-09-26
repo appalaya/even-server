@@ -60,3 +60,13 @@ BEGIN
                     last_write_at = NEW.created_at
    WHERE id = NEW.group_id;
 END;
+
+-- The daily write budget, checked inside the append batch as the counter is bumped, so appends in flight at the
+-- boundary cannot overshoot it. 0 means no budget; a missing row fails CLOSED. The first append of a day inserts
+-- writes = 1, which no budget of at least 1 refuses, so only the update needs checking.
+CREATE TRIGGER IF NOT EXISTS counters_budget BEFORE UPDATE OF writes ON counters
+WHEN NEW.writes > COALESCE((SELECT value FROM limits WHERE key = 'daily_write_budget'), 0)
+ AND (SELECT value FROM limits WHERE key = 'daily_write_budget') IS NOT 0
+BEGIN
+  SELECT RAISE(ABORT, 'over_budget');
+END;

@@ -165,18 +165,10 @@ async function appendEvents(request: Request, env: Env, route: Route): Promise<R
   if (!(await allow(env.RATE_WRITES, 'RATE_WRITES', key))) throw rateLimited();
   if (!state.exists && !(await allow(env.RATE_CREATES, 'RATE_CREATES', key))) throw rateLimited();
 
-  // Checked against the count read in the prelude and incremented inside the append batch: concurrent appends at
-  // the boundary can pass it by at most the number in flight, which does not matter for a quota guard.
-  if (limits.daily_write_budget > 0 && state.writesToday >= limits.daily_write_budget) {
-    throw new ApiError(
-      503,
-      'over_budget',
-      "the server's daily write budget is exhausted; reads still work",
-      {
-        headers: { 'Retry-After': String(secondsUntilUtcMidnight(now)) },
-      },
-    );
-  }
+  // The counters_budget trigger enforces the budget exactly, inside the append batch. This check against the count
+  // read in the prelude only answers early once the day is spent, without running a batch that would be refused.
+  if (limits.daily_write_budget > 0 && state.writesToday >= limits.daily_write_budget)
+    throw overBudget(now);
 
   const unique = firstOccurrences(envelopes);
   let result: store.AppendResult;
@@ -187,6 +179,7 @@ async function appendEvents(request: Request, env: Env, route: Route): Promise<R
       day,
     });
   } catch (error) {
+    if (error instanceof store.OverBudget) throw overBudget(now);
     if (!(error instanceof store.GroupFull)) throw error;
     const reason = await store.fullReason(env.DB, groupId, unique, limits);
     const detail =
@@ -239,6 +232,17 @@ async function readJsonBody(request: Request, maxBytes: number): Promise<unknown
   } catch {
     throw invalidRequest('body is not a JSON document');
   }
+}
+
+function overBudget(now: Date): ApiError {
+  return new ApiError(
+    503,
+    'over_budget',
+    "the server's daily write budget is exhausted; reads still work",
+    {
+      headers: { 'Retry-After': String(secondsUntilUtcMidnight(now)) },
+    },
+  );
 }
 
 /** §6.6: 16 random bytes, 22 base64url characters. */

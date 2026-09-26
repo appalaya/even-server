@@ -252,6 +252,56 @@ describe('daily write budget', () => {
       expect(await body(await read(group))).toMatchObject({ next: 1 });
     });
   });
+
+  it('is exact under concurrency: appends in flight at the boundary cannot overshoot it', async () => {
+    const day = new Date().toISOString().slice(0, 10);
+    const counter = async (): Promise<number> =>
+      (
+        await env.DB.prepare('SELECT writes FROM counters WHERE day = ?')
+          .bind(day)
+          .first<{ writes: number }>()
+      )?.writes ?? 0;
+    const used = await counter();
+    await withLimits({ daily_write_budget: used + 3 }, async () => {
+      // Every request reads the counter before any of them writes it, so a check in application code alone passes
+      // all eight; the counters_budget trigger refuses the increment inside each batch instead.
+      const groups = await Promise.all(Array.from({ length: 8 }, () => freshGroup()));
+      const responses = await Promise.all(groups.map((group) => append(group, [envelope()])));
+      const statuses = responses.map((r) => r.status).sort();
+      expect(statuses).toEqual([200, 200, 200, 503, 503, 503, 503, 503]);
+      for (const response of responses.filter((r) => r.status === 503)) {
+        expect(await body(response)).toMatchObject({ error: 'over_budget' });
+        expect(Number(response.headers.get('Retry-After'))).toBeGreaterThanOrEqual(1);
+      }
+      expect(await counter()).toBe(used + 3);
+      const stored = await Promise.all(
+        groups.map(async (group) => (await body(await read(group))).epoch),
+      );
+      expect(stored.filter((epoch) => epoch !== null)).toHaveLength(3);
+    });
+  });
+
+  it('the counters_budget trigger refuses an increment past the budget, and fails closed without its row', async () => {
+    const day = '1999-12-31';
+    const bump = env.DB.prepare(
+      'INSERT INTO counters (day, writes) VALUES (?, 1) ON CONFLICT (day) DO UPDATE SET writes = writes + 1',
+    ).bind(day);
+    try {
+      await withLimits({ daily_write_budget: 2 }, async () => {
+        await bump.run();
+        await bump.run();
+        await expect(bump.run()).rejects.toThrow(/over_budget/);
+      });
+      await withLimits({ daily_write_budget: 0 }, async () => {
+        await bump.run(); // 0 means no budget
+      });
+      await env.DB.prepare("DELETE FROM limits WHERE key = 'daily_write_budget'").run();
+      await expect(bump.run()).rejects.toThrow(/over_budget/);
+    } finally {
+      await env.DB.prepare('DELETE FROM counters WHERE day = ?').bind(day).run();
+      await seedLimits();
+    }
+  });
 });
 
 describe('blocklist', () => {

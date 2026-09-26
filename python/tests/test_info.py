@@ -1,5 +1,7 @@
 import sqlite3
 
+import pytest
+
 from support import batch, envelope, new_group
 
 
@@ -53,3 +55,17 @@ def test_limits_table_is_seeded_on_start(client):
         "max_page": 500, "daily_write_budget": 0, "requests_per_minute": 100000,
         "writes_per_minute": 100000, "group_creates_per_minute": 100000, "retention_days": 365,
     }
+
+
+@pytest.mark.parametrize("change", ["DELETE FROM limits WHERE key = 'max_batch'",
+                                    "UPDATE limits SET value = -1 WHERE key = 'max_batch'",
+                                    "UPDATE limits SET value = 'many' WHERE key = 'max_batch'"])
+def test_a_missing_or_invalid_limit_row_fails_closed(client, change):
+    with sqlite3.connect(client.app.state.store.path) as db:
+        db.execute(change)
+    group = new_group()
+    for response in (client.get("/v1/info"),
+                     client.post(group.events, json=batch(envelope()), headers=group.headers),
+                     client.get(group.events, headers=group.headers)):
+        assert response.status_code == 500
+        assert response.json() == {"error": "server_error"}

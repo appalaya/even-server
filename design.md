@@ -83,12 +83,24 @@ BEGIN
                     last_write_at = NEW.created_at
    WHERE id = NEW.group_id;
 END;
+
+-- The daily write budget, checked as the append batch bumps the day's counter,
+-- so appends in flight at the boundary cannot overshoot it. 0 means no budget;
+-- a missing row fails CLOSED. The first append of a day inserts writes = 1,
+-- which no budget of at least 1 refuses, so only the update is checked.
+CREATE TRIGGER counters_budget BEFORE UPDATE OF writes ON counters
+WHEN NEW.writes > COALESCE((SELECT value FROM limits WHERE key = 'daily_write_budget'), 0)
+ AND (SELECT value FROM limits WHERE key = 'daily_write_budget') IS NOT 0
+BEGIN
+  SELECT RAISE(ABORT, 'over_budget');
+END;
 ```
 
 `bytes` counts stored size as the protocol defines it (decoded ciphertext plus
 64), not base64 length, so the published cap means what it says. The trigger
-pair is the whole cap and accounting implementation; nothing in application
-code sums bytes.
+pair on `events` is the whole cap and accounting implementation; nothing in
+application code sums bytes. `counters_budget` does the same for the daily
+write budget.
 
 ## Request handling
 
@@ -118,6 +130,8 @@ with no rows.
    creation limiter.
 4. Run one atomic batch:
    ```sql
+   INSERT INTO counters (day, writes) VALUES (?, 1)
+     ON CONFLICT (day) DO UPDATE SET writes = writes + 1;   -- today, UTC
    INSERT OR IGNORE INTO groups (id, epoch, created_at, last_write_at) VALUES (?, ?, ?, ?);
    -- one per envelope, in request order:
    INSERT OR IGNORE INTO events (group_id, seq, id, v, n, c, size, created_at)
@@ -127,8 +141,10 @@ with no rows.
    Each insert computes its own `seq` from `MAX(seq)` inside the statement, so
    consecutive inserts in the batch get consecutive values. `INSERT OR IGNORE`
    skips duplicates by the `(group_id, id)` unique constraint without touching
-   `seq`. The cap trigger aborts the whole batch if any insert would exceed a
-   cap, and the batch rolls back; the handler maps `group_full` to `413`.
+   `seq`. The budget trigger aborts the whole batch if the counter would pass
+   the daily budget, and the cap trigger if any insert would exceed a cap; the
+   batch rolls back, counter included, and the handler maps `over_budget` to
+   `503` and `group_full` to `413`.
 5. `accepted` = number of inserts that changed a row (from the driver's
    per-statement change count); `duplicates` = envelopes − accepted. Return
    `{ accepted, duplicates, seq, epoch }`.
@@ -169,8 +185,12 @@ limits and the daily write budget.
 ### Global write budget
 
 The public server keeps a daily counter of write requests in `counters`,
-incremented in the append batch. Past `EVEN_DAILY_WRITE_BUDGET`, appends
-return `503 over_budget` with `Retry-After` until midnight UTC; reads continue.
+incremented in the append batch, where the `counters_budget` trigger refuses
+an increment past `EVEN_DAILY_WRITE_BUDGET`, so the budget is exact however
+many appends are in flight. Past it, appends return `503 over_budget` with
+`Retry-After` until midnight UTC; reads continue. (The Worker also checks the
+count it read in the request prelude, which only answers early once the day
+is spent.)
 This bounds the free tier's row-write quota and, on a paid plan, the bill.
 `0` disables it, and the value is published in `/v1/info` either way.
 
@@ -240,9 +260,14 @@ group ids, no IPs.
 - **Worker:** `console.log` JSON lines. `observability.logs.invocation_logs`
   is **off** in `wrangler.jsonc`, because invocation logs record the request
   URL, which contains the group id.
-- **Python:** the standard `logging` module; uvicorn started with
-  `--no-access-log`. The README states that Caddy's `log` directive records
-  full URIs and shows how to disable or redact it.
+- **Python:** the standard `logging` module; uvicorn started with its access
+  log off and WebSockets off (uvicorn logs every WebSocket handshake with the
+  client address and URL, through its error logger). One JSON formatter is the
+  boundary for every line: the server's own lines are structured fields;
+  anything from uvicorn or another library is written as its format string,
+  never with its arguments, and scrubbed of paths, ids and addresses.
+  Tracebacks are never written. The README states that Caddy's `log`
+  directive records full URIs and shows how to disable or redact it.
 
 ## The Worker (`worker/`)
 

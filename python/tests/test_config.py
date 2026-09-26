@@ -1,6 +1,9 @@
+import re
+from pathlib import Path
+
 import pytest
 
-from even_server.config import Config, ConfigError
+from even_server.config import LIMIT_VARIABLES, Config, ConfigError
 from even_server.limits import Limits
 
 
@@ -52,3 +55,24 @@ def test_invalid_values_are_refused_at_start(env):
 
 def test_empty_values_mean_unset():
     assert Config.from_env({"EVEN_MAX_BATCH": "", "EVEN_TRUST_PROXY_HEADER": " "}) == Config.from_env({})
+
+
+def test_limit_variables_match_the_worker_and_design_md():
+    """Both references read the same EVEN_* names into the same table keys, with
+    the same defaults and minimums, and design.md documents those defaults."""
+    repo = Path(__file__).resolve().parents[2]
+    vars_ts, wrangler, design = repo / "worker/src/vars.ts", repo / "worker/wrangler.jsonc", repo / "design.md"
+    if not all(path.exists() for path in (vars_ts, wrangler, design)):
+        pytest.skip("not running inside the full repository")
+    ours = {name: (key, default, minimum) for name, key, default, minimum in LIMIT_VARIABLES}
+    defaults = {name: default for name, (_, default, _) in ours.items()}
+
+    worker = {name: (key, int(default.replace("_", "")), int(minimum)) for name, key, default, minimum in re.findall(
+        r"variable: '(EVEN_\w+)',\s*key: '(\w+)',\s*fallback: ([\d_]+),\s*minimum: (\d+)", vars_ts.read_text())}
+    assert worker == ours
+
+    top_level = wrangler.read_text().split('"env":')[0]  # the production vars, not env.test
+    assert {name: int(value) for name, value in re.findall(r'"(EVEN_\w+)": "(\d+)"', top_level)} == defaults
+
+    documented = re.findall(r"^\| `(EVEN_\w+)` \| `(\d+)`", design.read_text(), re.MULTILINE)
+    assert {name: int(value) for name, value in documented} == defaults

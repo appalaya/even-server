@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 
 from even_server.app import create_app
 from even_server.config import Config
+from even_server.main import UVICORN_OPTIONS
 from even_server.ratelimit import RateLimiter
 from support import TEST_ENV
 
@@ -46,7 +47,7 @@ def live_server(tmp_path) -> Iterator[str]:
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     sock.bind(("127.0.0.1", 0))
     port = sock.getsockname()[1]
-    server = uvicorn.Server(uvicorn.Config(app, access_log=False, log_config=None, lifespan="off"))
+    server = uvicorn.Server(uvicorn.Config(app, lifespan="off", **UVICORN_OPTIONS))  # as `even-server` runs it
     thread = threading.Thread(target=server.run, kwargs={"sockets": [sock]}, daemon=True)
     thread.start()
     deadline = time.monotonic() + 10

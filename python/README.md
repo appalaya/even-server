@@ -16,12 +16,14 @@ cd python
 python3.14 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-pip install --no-deps -e .        # optional: provides the `even-server` command
+pip install --no-deps -e .        # provides the `even-server` command
 ```
 
-`requirements.txt` pins `fastapi` and `uvicorn[standard]`. On 32-bit Raspberry
-Pi OS, `uvicorn[standard]`'s optional speed-ups may have to compile. If that
-fails, `pip install fastapi==0.141.1 uvicorn==0.54.0` works everywhere.
+`requirements.txt` pins the only two runtime dependencies, `fastapi` and
+`uvicorn`: plain `uvicorn`, because the `[standard]` extras add WebSocket and
+speed-up packages this server does not use (and that may need compiling on
+32-bit Raspberry Pi OS). Run every command below with the venv active
+(`source .venv/bin/activate`), or call `.venv/bin/even-server` directly.
 
 ## Run
 
@@ -56,7 +58,11 @@ server rewrites those, at start, from its own environment.
 Everything is set through environment variables, read once at start. The limit
 variables have the same names and defaults as the Cloudflare Worker. At start
 they are written to the `limits` table, and `/v1/info` and every check read them
-back from there, so what is published is what is enforced.
+back from there, so what is published is what is enforced. **To change a limit,
+change the variable and restart the server**: every start re-seeds the table
+from the environment. (The Worker has no start, so there it is an explicit
+`npm run db:seed:remote`.) A limit row that goes missing from the table while the
+server runs makes requests fail with `500` rather than guess a value.
 
 | Variable | Default | Meaning |
 |---|---|---|
@@ -116,8 +122,10 @@ Your server URL is `https://sync.example.net`.
 > The same applies to nginx (`access_log off;` in the location block) and to
 > anything else you put in front.
 
-This server writes no access log of its own. uvicorn's access log is off, and
-the server writes one JSON line per request to stderr:
+This server writes no access log of its own. uvicorn's access log is off, as
+is its WebSocket support (uvicorn logs every WebSocket handshake with the
+client's address and URL), and the server writes one JSON line per request to
+stderr:
 
 ```json
 {"method":"POST","route":"/v1/groups/{groupId}/events","status":200,"ms":2.1,"limited":false}
@@ -125,7 +133,14 @@ the server writes one JSON line per request to stderr:
 
 That line holds the route *pattern*. It never holds the URL, the group id, the
 token, the body, or the client's address. Unhandled errors are logged by
-exception type and code location only.
+exception type and code location only. Lines from uvicorn itself (start,
+shutdown, "Invalid HTTP request received.") are written as uvicorn's message
+template, without its arguments, so `"Uvicorn running on %s://%s:%d"` appears
+literally; the server logs its own `{"event":"serve","host":…,"port":…}` line
+at start instead. A WebSocket request is answered as a plain HTTP request and
+makes uvicorn warn "Unsupported upgrade request." and "No supported WebSocket
+library detected"; both are expected, and installing a WebSocket library
+changes nothing.
 
 ## Without opening ports: tunnels
 

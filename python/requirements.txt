@@ -1,3 +1,5 @@
 # Runtime dependencies, pinned. Python 3.14 or newer is required.
+# Plain uvicorn, not uvicorn[standard]: its extras (websockets, uvloop, httptools, watchfiles, python-dotenv,
+# pyyaml) are unused, and the server runs with WebSockets off (even_server/main.py).
 fastapi==0.141.1
-uvicorn[standard]==0.54.0
+uvicorn==0.54.0

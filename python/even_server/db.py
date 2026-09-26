@@ -142,21 +142,25 @@ class Store:
         epoch: str,
         now_ms: int,
         day: str,
-        budget: int,
     ) -> AppendResult:
         """Store `envelopes` (already de-duplicated within the request) atomically.
 
         `epoch` is used only if this write creates the group. Raises `OverBudget`
-        or `GroupFull`; either way nothing is stored and the counter is not bumped.
+        (the budget trigger refused the day's counter) or `GroupFull` (the cap
+        trigger refused an insert); either way nothing is stored and the counter
+        is not bumped.
         """
         with self._write() as conn:
-            [(writes,)] = conn.execute(
-                "INSERT INTO counters (day, writes) VALUES (?, 1)"
-                " ON CONFLICT (day) DO UPDATE SET writes = writes + 1 RETURNING writes",
-                (day,),
-            ).fetchall()
-            if budget > 0 and writes > budget:
-                raise OverBudget()
+            try:
+                conn.execute(
+                    "INSERT INTO counters (day, writes) VALUES (?, 1)"
+                    " ON CONFLICT (day) DO UPDATE SET writes = writes + 1",
+                    (day,),
+                )
+            except sqlite3.IntegrityError as exc:
+                if "over_budget" not in str(exc):
+                    raise
+                raise OverBudget() from None
             conn.execute(
                 "INSERT OR IGNORE INTO groups (id, epoch, created_at, last_write_at) VALUES (?, ?, ?, ?)",
                 (group_id, epoch, now_ms, now_ms),
