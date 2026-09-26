@@ -1,0 +1,28 @@
+# Dependencies
+node_modules/
+
+# Cloudflare
+.wrangler/
+.dev.vars
+dist/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.db
+*.sqlite
+
+# Environment
+.env
+.env.*
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+
+# Testing
+coverage/
+*.tsbuildinfo
