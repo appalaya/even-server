@@ -89,7 +89,9 @@ describe('§4 malformed envelopes → 400 invalid_envelope with index, nothing s
     ['id as a number', (g) => malformed.withField(g.envelope(), 'id', 1234567890)],
     ['id null', (g) => malformed.withField(g.envelope(), 'id', null)],
     ['v as the string "1"', (g) => malformed.withField(g.envelope(), 'v', '1')],
-    ['v as 1.5', (g) => malformed.withField(g.envelope(), 'v', 1.5)],
+    ['v: 0 (§4: v must be a positive integer)', (g) => malformed.withField(g.envelope(), 'v', 0)],
+    ['v: -1 (§4: v must be a positive integer)', (g) => malformed.withField(g.envelope(), 'v', -1)],
+    ['v: 1.5 (§4: v must be a positive integer)', (g) => malformed.withField(g.envelope(), 'v', 1.5)],
     ['v as true', (g) => malformed.withField(g.envelope(), 'v', true)],
     ['v null', (g) => malformed.withField(g.envelope(), 'v', null)],
     ['n of 31 characters', (g) => ({ ...g.envelope(), n: malformed.chars(31) })],
@@ -115,7 +117,7 @@ describe('§4 malformed envelopes → 400 invalid_envelope with index, nothing s
   });
 });
 
-describe('§4 boundaries that must be accepted, and v', () => {
+describe('§4 boundaries that must be accepted, and an unsupported v', () => {
   it('c decoding to exactly 17 bytes is accepted (the structural floor)', async () => {
     const group = TestGroup.fresh();
     const tiny = group.envelope({ cipherBytes: MIN_C_BYTES });
@@ -138,15 +140,11 @@ describe('§4 boundaries that must be accepted, and v', () => {
     expect((await group.readOk()).events.map(unsequenced)).toEqual([envelope]);
   });
 
-  it('v: 2 (well-formed, unsupported) → 415 unsupported_version with index', async () => {
+  it('v: 2 (a positive integer this server does not support) → 415 unsupported_version with index', async () => {
     const group = TestGroup.fresh();
     await expectRejectedAtIndex1(group, group.envelope({ v: 2 }), 415, 'unsupported_version');
   });
 
-  it('v: 0 → 415 unsupported_version with index (§4 types v as an integer; 0 is an integer this server does not support)', async () => {
-    const group = TestGroup.fresh();
-    await expectRejectedAtIndex1(group, malformed.withField(group.envelope(), 'v', 0), 415, 'unsupported_version');
-  });
 });
 
 describe('§6.2 batch bounds and body shape → 400 invalid_request', () => {

@@ -169,10 +169,9 @@ is wrong, change PROTOCOL.md first, then the test.
 - **400 before 415 across the whole batch (§6.2).** Every envelope is checked structurally, in array order, before
   any is checked for its version. A batch with an unknown `v` at index 0 and a structural error at index 2 gets
   `400 invalid_envelope` with `index: 2`.
-- **`v: 0` is `415 unsupported_version`.** §4 types `v` as an integer and says unknown values get
-  `unsupported_version`. Non-integers (`"1"`, `1.5`, `true`, `null`) are `400 invalid_envelope`. The app's own
-  `envelopeShape` treats `v ≤ 0` as malformed when *reading*. That is a client-side classification and does not
-  bind the server.
+- **`v` must be a positive integer (§4).** `0`, `-1`, `1.5`, `"1"`, `true` and `null` are `400 invalid_envelope`;
+  only a positive integer the server does not support (`2`) is `415 unsupported_version`. This matches the app's
+  `isEnvelope`/`envelopeShape`.
 - **An id repeated within one request keeps its first occurrence**, and counts as 1 accepted + 1 duplicate. The
   second occurrence meets an id that already exists, and stored content is never replaced.
 - **Non-object entries in `events`** (`null`, an array, a string) are `400 invalid_envelope` with their `index`, not
