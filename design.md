@@ -283,8 +283,10 @@ group ids, no IPs.
   `limits` table, not `vars`, so what is published is what is enforced. No
   migration framework; there are five small tables and the protocol is
   versioned by path.
-- Deploys with `wrangler deploy`. The free server is this, on the `workers.dev`
-  subdomain with a custom domain of `sync.even.appalaya.com` in front.
+- Deployed only by GitHub Actions (`.github/workflows/deploy.yml`), which finds
+  or creates the D1 database, applies `schema.sql` and the seed, and runs
+  `wrangler deploy`. The free server is this, at the Workers custom domain
+  `sync.even.appalaya.com`; `workers.dev` and preview URLs are off.
 
 ## The Python reference (`python/`)
 

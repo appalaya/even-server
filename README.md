@@ -8,7 +8,7 @@ that moves client-encrypted events between phones. It never sees an expense.
 
 - **Protocol:** [`PROTOCOL.md`](PROTOCOL.md) — the complete contract. Anyone can implement it.
 - **Threat model:** [`THREAT-MODEL.md`](THREAT-MODEL.md) — what the server can and cannot know.
-- **Reference servers:** `worker/` (Cloudflare Workers + D1, what runs at sync.even.appalaya.com) and `python/` (a small FastAPI + SQLite package, for self-hosters).
+- **Reference servers:** `worker/` (Cloudflare Workers + D1, what runs at sync.even.appalaya.com, deployed from `main` by GitHub Actions: `.github/workflows/deploy.yml`) and `python/` (a small FastAPI + SQLite package, for self-hosters).
 - **Conformance suite:** `conformance/` — run it against any URL; passing it is what makes a server an Even server.
 
 ## Why a server at all
@@ -51,6 +51,7 @@ scope.md               — what's in and out for v1
 design.md              — architecture of the reference servers
 working-principles.md  — how we work
 worker/                — Cloudflare Workers + D1 reference (TypeScript)
+.github/workflows/     — deploy.yml: the only way worker/ reaches sync.even.appalaya.com
 python/                — FastAPI + SQLite reference
 conformance/           — protocol test suite
 ```

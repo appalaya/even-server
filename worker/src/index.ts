@@ -43,7 +43,7 @@ function errorResponse(error: unknown, route: string | null): Response {
     logEvent('error', 'limits_missing', {
       route,
       missing: error.missing,
-      fix: 'npm run db:seed (or db:seed:remote)',
+      fix: 'npm run db:seed locally; in production, re-run the deploy workflow',
     });
   } else {
     logException(route, error);

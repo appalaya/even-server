@@ -2,7 +2,7 @@
 -- written idempotently so that `npm run db:schema` can be re-run safely.
 --
 -- Apply with:  npx wrangler d1 execute even --local  --file schema.sql     (npm run db:schema)
---              npx wrangler d1 execute even --remote --file schema.sql     (npm run db:schema:remote)
+-- Production:  the deploy workflow runs the same with --remote on every deploy (README.md, "Deploying").
 
 CREATE TABLE IF NOT EXISTS limits (     -- seeded from EVEN_* vars (seed-limits.sql); /v1/info is built FROM this table
   key   TEXT PRIMARY KEY,               -- every published limit, e.g. 'max_group_bytes'

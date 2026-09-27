@@ -1,14 +1,16 @@
 # Even sync server: Cloudflare Workers + D1 reference
 
-The Worker that runs the public server at `https://sync.even.appalaya.com`. It implements
-[`PROTOCOL.md`](../PROTOCOL.md) v1: it stores client-encrypted envelopes per group, hands them back in order, and
-cannot read any of them. It passes the [conformance suite](../conformance/) (below).
+The Worker that runs the public server at `https://sync.even.appalaya.com`, deployed from `main` by GitHub Actions
+([Deploying](#deploying)). It implements [`PROTOCOL.md`](../PROTOCOL.md) v1: it stores client-encrypted envelopes
+per group, hands them back in order, and cannot read any of them. It passes the [conformance suite](../conformance/)
+(below).
 
 No framework and no runtime dependencies. Dev dependencies are `wrangler`, `typescript`,
 `@cloudflare/workers-types`, `vitest` and `@cloudflare/vitest-pool-workers`. Node 24 or newer.
 
 ```
-wrangler.jsonc          D1 binding, three rate limiters, cron, EVEN_* vars, observability (invocation logs off)
+wrangler.jsonc          D1 binding, three rate limiters, cron, EVEN_* vars, observability (invocation logs off),
+                        workers.dev off
 schema.sql              tables and the cap, accounting and daily-budget triggers (design.md, "Storage model")
 scripts/seed-limits.mjs vars → seed-limits.sql (the `limits` table); refuses bad values and limiter mismatches
 src/index.ts            fetch (route, handle, headers, one log line) and scheduled (expiry)
@@ -147,41 +149,105 @@ and keeps using the table.
 
 1. Edit the var in `wrangler.jsonc`. For a rate, also set the matching binding's `simple.limit` to the same number;
    the seed script refuses to run while they differ.
-2. `npm run db:seed:remote`: the new value is published and, for caps and page/batch sizes, enforced from this moment.
-3. `npm run deploy`: needed for rate changes (the binding threshold ships with the deploy) and to keep the vars in step.
+2. Merge to `main`. The deploy re-seeds the `limits` table from the vars, which publishes and enforces the new value,
+   then deploys the Worker, which ships a changed rate-limiter threshold. The run's summary lists the seeded limits,
+   and the run fails if `/v1/info` does not publish exactly those.
 
-Locally, `npm run db:seed` (or `db:seed:test`) is step 2; `wrangler dev` picks up config edits by itself.
+Locally, `npm run db:seed` (or `db:seed:test`) does the seeding; `wrangler dev` picks up config edits by itself.
 
-## Deploy
-
-```sh
-npx wrangler login
-npx wrangler d1 create even          # paste the printed database_id into d1_databases in wrangler.jsonc
-npm run db:schema:remote             # tables and triggers (idempotent)
-npm run db:seed:remote               # the limits table, from the top-level vars
-npm run deploy
-```
-
-After pulling a change to `schema.sql` (for example a new trigger), run `npm run db:schema:remote` again before
-deploying: every statement is `IF NOT EXISTS`, so it adds what is missing and leaves data alone.
-
-Then add the custom domain (`sync.even.appalaya.com`) to the Worker in the dashboard, and for the public server set
-`EVEN_DAILY_WRITE_BUDGET`, `EVEN_OPERATOR` and `EVEN_TERMS_URL` (then re-seed and deploy). Each `ratelimits`
-`namespace_id` must be unique within the account; change them if another Worker already uses 4101–4103.
-
-The `test` environment can be deployed as a staging server for running the conformance suite against real
-infrastructure: create a database for it, replace its `local-even-test` id, apply `schema.sql`, seed with
-`node scripts/seed-limits.mjs --env test`, and `npx wrangler deploy --env test`.
+For the public server, set `EVEN_DAILY_WRITE_BUDGET`, `EVEN_OPERATOR` and `EVEN_TERMS_URL` this way. Each
+`ratelimits` `namespace_id` must be unique within the account; change them if another Worker already uses 4101–4103.
 
 A note on raising `EVEN_MAX_BATCH`: an append is one prelude batch (4 statements) plus one write batch
 (`max_batch` + 3), plus 2 more on a `413`. If D1 counts each batched statement toward the per-invocation query
 limit (50 on the free plan), the default of 25 leaves room and much above 40 would not; check the current D1 limits
 before raising it.
 
+## Deploying
+
+The public server is deployed by GitHub Actions and nothing else:
+[`.github/workflows/deploy.yml`](../.github/workflows/deploy.yml). There is no deploy script to run locally. A push
+to `main` that changes `worker/` or the workflow deploys, and so does **Run workflow** on the Deploy workflow in the
+Actions tab (it deploys `main` only). A running deploy always finishes; the next one waits for it.
+
+A run, in order:
+
+1. `npm ci`, typecheck, unit tests, `node scripts/seed-limits.mjs` (refuses a bad var or a limiter mismatch) and
+   `wrangler deploy --dry-run`. Any failure stops the run before Cloudflare is touched.
+2. Looks up the D1 database named `even` (`wrangler d1 list --json`) and creates it (`wrangler d1 create even`) if
+   the account has none, so the first run needs no preparation. The committed `wrangler.jsonc` has no
+   `database_id`: the run adds the id to its own copy of the file (one line, comments kept), and that copy goes
+   away with the runner.
+3. Applies `schema.sql`, then `seed-limits.sql`, with `wrangler d1 execute even --remote --file`. Both are safe on
+   every run: the schema is all `CREATE … IF NOT EXISTS` (it adds what is missing, such as a new trigger, and
+   leaves data alone), and the seed is one upsert per limit. D1 runs a `--file` as an import, which is atomic;
+   Wrangler warns that the database does not serve queries while an import runs, which for these two small files
+   is a moment per deploy.
+4. `wrangler deploy --env=""`: the top-level Worker, `even-sync`. `env.test` is for local conformance runs and is
+   never deployed.
+5. `GET https://sync.even.appalaya.com/v1/info`, compared with the seeded limits, and a job summary with the URL,
+   the database, the seeded limits and the response. A failed check or a mismatch fails the run. Until the custom
+   domain exists (below), the name does not resolve, and the check is skipped with a notice.
+
+### Secrets
+
+Two repository secrets (Settings → Secrets and variables → Actions), passed only to the steps that call Cloudflare,
+never to `npm ci` or the tests:
+
+| Secret | Value |
+|---|---|
+| `CLOUDFLARE_API_TOKEN` | an API token with the permissions below |
+| `CLOUDFLARE_ACCOUNT_ID` | the Cloudflare account ID (in the dashboard, and in every dashboard URL after `dash.cloudflare.com/`) |
+
+A run without them stops at "Check the Cloudflare secrets", after the tests.
+
+### API token permissions
+
+| Permission | Used for |
+|---|---|
+| Account · Workers Scripts · Edit | uploading the Worker with its rate-limiter bindings, cron schedule, vars and observability settings; keeping workers.dev and Version URLs off |
+| Account · D1 · Edit | `d1 list`, `d1 create`, and `d1 execute --remote` (schema and seed) |
+
+That is everything the deploy uses. It runs with an existing token that has Workers Scripts Edit, Workers KV Storage
+Edit and Account Settings Read on the account and Workers Routes Edit on all zones; **D1 Edit is the one addition**.
+The other three are unused here (no KV binding, no routes, and with `CLOUDFLARE_ACCOUNT_ID` set Wrangler never looks
+the account up). No DNS, zone or SSL permission is needed: the deploy creates no DNS record, route, domain or
+certificate. The token editor calls write access "Edit"; Cloudflare's template documentation calls it "Write".
+
+### The custom domain, once
+
+After the first successful run, attach the hostname in the Cloudflare dashboard: **Workers & Pages → even-sync →
+Settings → Domains & Routes → Add → Custom Domain → `sync.even.appalaya.com`**. Cloudflare creates the DNS record
+and the certificate; nobody edits DNS. To check it straight away, start the workflow by hand: its smoke check now
+runs instead of being skipped.
+
+It has to be a Workers custom domain, not a DNS record plus a route. `sync.even.appalaya.com` is a second-level
+subdomain, and the zone's free Universal SSL certificate covers only `appalaya.com` and first-level names such as
+`even.appalaya.com`. A custom domain gets its own certificate for the exact hostname at no cost and creates its DNS
+record itself.
+
+`wrangler.jsonc` deliberately has no `routes`: with none, `wrangler deploy` leaves the Worker's domains alone, so
+the attachment survives every deploy. `workers_dev` and `preview_urls` are `false`, so the custom domain is the only
+address (without them, a deploy with no routes turns workers.dev on). Until the domain is attached, the deployed
+Worker has no public address at all, which is fine: nothing points at it yet.
+
+### What the free plan covers
+
+Everything the deploy turns on runs on the Workers Free plan: the Worker (100,000 requests a day, 10 ms CPU per
+request), the cron trigger (5 per account on Free; this uses 1), the three Rate Limiting bindings (Cloudflare's
+documentation lists no plan requirement or price for them), Workers Logs (200,000 events a day, kept 3 days) and
+D1 (500 MB per database, 50 queries per invocation, 5 million rows read and 100,000 rows written a day). Past a
+daily D1 limit, queries fail until 00:00 UTC and the Worker answers `500`; `EVEN_DAILY_WRITE_BUDGET` is how to stop
+appends before that. Logpush and traces, which are off for privacy anyway, are not needed.
+
 ## Takedown (blocklist)
 
 A blocked group id answers `410 group_blocked` on every group route (after authentication), which clients treat as
 terminal. A plain delete is pointless: the next member who syncs recreates the group.
+
+Production's database is only on Cloudflare. Run the SQL below in the `even` database's Console in the dashboard
+(D1), or with Wrangler from a machine logged in to the account (`npx wrangler login`); `--remote` finds the database
+by name, so the id-free `wrangler.jsonc` works as it is. Neither is a deploy, and neither needs one.
 
 ```sh
 # block (the 43-character id from the request path, e.g. as given in an abuse report)
@@ -250,4 +316,5 @@ server's terms (PROTOCOL.md §9):
   after a deploy. Check there too that the Worker's own log events carry no request URL in the metadata Workers Logs
   attaches to them (Cloudflare's documentation does not say either way); if one does, set
   `observability.logs.enabled` to `false` and rely on `wrangler tail` for live debugging.
-- **Deploy itself**, the custom domain, and `database_id` / `namespace_id` values, which need an account.
+- **The deploy itself**: finding or creating the database, the remote schema and seed, and `wrangler deploy` run
+  only in the workflow, with the account's token; the custom domain is attached once, by hand.
