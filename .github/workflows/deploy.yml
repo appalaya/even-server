@@ -1,0 +1,226 @@
+# Deploys the Cloudflare Worker in worker/ as the public Even sync server, https://sync.even.appalaya.com.
+#
+# This workflow is the only way the public server is deployed; nothing deploys from a local machine. It tests the
+# Worker, finds the D1 database `even` (creating it on the first run), applies schema.sql and the limits seeded from
+# the vars in worker/wrangler.jsonc, deploys the top-level Worker, and checks /v1/info. worker/README.md, "Deploying",
+# covers the two secrets, the API token permissions and the one-time custom domain step.
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'worker/**'
+      - '.github/workflows/deploy.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# One deploy at a time; a newer push waits for the running deploy instead of cancelling it halfway.
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy the sync server
+    # A manual run can be started on any branch; only main is ever deployed.
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: worker
+    env:
+      SERVER_URL: https://sync.even.appalaya.com
+      WRANGLER_SEND_METRICS: 'false'
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: worker/package-lock.json
+
+      # Everything up to the secrets check runs without Cloudflare credentials, so dependency code never sees them.
+      - name: Install
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Unit tests
+        run: npm test
+
+      - name: Generate seed-limits.sql from the top-level vars
+        # Refuses a malformed var or a rate-limiter threshold that differs from its var.
+        run: node scripts/seed-limits.mjs
+
+      - name: Bundle and check the config (dry run)
+        run: npx wrangler deploy --env="" --dry-run
+
+      - name: Check the Cloudflare secrets
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          missing=""
+          [ -n "$CLOUDFLARE_API_TOKEN" ] || missing="$missing CLOUDFLARE_API_TOKEN"
+          [ -n "$CLOUDFLARE_ACCOUNT_ID" ] || missing="$missing CLOUDFLARE_ACCOUNT_ID"
+          if [ -n "$missing" ]; then
+            echo "::error title=Missing secrets::Add$missing as repository secrets (worker/README.md, \"Deploying\")."
+            exit 1
+          fi
+
+      - name: Find or create the D1 database
+        id: d1
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          find_id() {
+            npx wrangler d1 list --json | node -e '
+              const dbs = JSON.parse(require("node:fs").readFileSync(0, "utf8"));
+              const db = dbs.find((d) => d.name === "even");
+              if (db) console.log(db.uuid);
+            '
+          }
+          created=false
+          id=$(find_id)
+          if [ -z "$id" ]; then
+            echo "No D1 database named even in the account; creating it."
+            npx wrangler d1 create even --update-config=false
+            created=true
+            id=$(find_id)
+          fi
+          if ! [[ "$id" =~ ^[0-9a-fA-F-]{36}$ ]]; then
+            echo "::error::Could not find the D1 database even (got '$id')."
+            exit 1
+          fi
+          echo "D1 database even: $id (created by this run: $created)"
+          echo "id=$id" >> "$GITHUB_OUTPUT"
+          echo "created=$created" >> "$GITHUB_OUTPUT"
+
+      - name: Bind DB to that database in the runner's copy of wrangler.jsonc
+        # The committed wrangler.jsonc has no database_id. This adds it to the one binding named "even" (not env.test's
+        # "even-test"), editing the text so every comment stays; the edited file is never committed.
+        env:
+          D1_ID: ${{ steps.d1.outputs.id }}
+        run: |
+          node --input-type=module <<'EOF'
+          import { readFileSync, writeFileSync } from 'node:fs';
+          const text = readFileSync('wrangler.jsonc', 'utf8');
+          const binding = /"database_name": "even"(\s*)\}/g;
+          const found = text.match(binding) ?? [];
+          if (found.length !== 1) {
+            console.error(`Expected one "database_name": "even" binding in wrangler.jsonc, found ${found.length}.`);
+            process.exit(1);
+          }
+          const id = process.env.D1_ID;
+          writeFileSync('wrangler.jsonc', text.replace(binding, `"database_name": "even", "database_id": "${id}"$1}`));
+          EOF
+          git diff -- wrangler.jsonc
+
+      - name: Apply schema.sql
+        # Every statement is CREATE ... IF NOT EXISTS: it adds what is missing and leaves data alone.
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: npx wrangler d1 execute even --remote --yes --file schema.sql
+
+      - name: Seed the limits table
+        # Upserts, one per limit: /v1/info and every check read this table, so this publishes and enforces the vars.
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: npx wrangler d1 execute even --remote --yes --file seed-limits.sql
+
+      - name: Deploy the Worker
+        # --env="" is the top-level environment; env.test is local only and never deployed.
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: npx wrangler deploy --env=""
+
+      - name: Check /v1/info and write the summary
+        env:
+          D1_ID: ${{ steps.d1.outputs.id }}
+          D1_CREATED: ${{ steps.d1.outputs.created }}
+        run: |
+          node --input-type=module <<'EOF'
+          import { appendFileSync, readFileSync } from 'node:fs';
+
+          const server = process.env.SERVER_URL;
+          const lines = [];
+          const finish = (code) => {
+            appendFileSync(process.env.GITHUB_STEP_SUMMARY, `${lines.join('\n')}\n`);
+            process.exit(code);
+          };
+
+          // What this run seeded: the rows of the seed-limits.sql that was just executed.
+          const sql = readFileSync('seed-limits.sql', 'utf8');
+          const seeded = Object.fromEntries(
+            [...sql.matchAll(/VALUES \('([a-z_]+)', (\d+)\)/g)].map(([, key, value]) => [key, Number(value)]),
+          );
+
+          lines.push(
+            '## Even sync server deployed',
+            '',
+            `- URL: ${server} (workers.dev and preview URLs are off)`,
+            `- Commit: \`${process.env.GITHUB_SHA.slice(0, 12)}\``,
+            `- D1 database: \`even\` (\`${process.env.D1_ID}\`)${process.env.D1_CREATED === 'true' ? ', created by this run' : ''}`,
+            '',
+            '| Limit | Seeded |',
+            '|---|---:|',
+            ...Object.entries(seeded).map(([key, value]) => `| \`${key}\` | ${value} |`),
+            '',
+          );
+
+          // The custom domain is attached by hand once, after the first deploy. Until then the name does not resolve.
+          let info;
+          let lastError = '';
+          for (let attempt = 1; attempt <= 6 && info === undefined; attempt++) {
+            if (attempt > 1) await new Promise((resolve) => setTimeout(resolve, 10_000));
+            try {
+              const response = await fetch(`${server}/v1/info`, { signal: AbortSignal.timeout(10_000) });
+              const body = await response.text();
+              if (response.ok) info = JSON.parse(body);
+              else lastError = `HTTP ${response.status}: ${body.slice(0, 200)}`;
+            } catch (error) {
+              if (error?.cause?.code === 'ENOTFOUND') {
+                const message = `${new URL(server).host} does not resolve yet, so /v1/info was not checked. Attach the custom domain once (worker/README.md, "Deploying").`;
+                console.log(`::notice title=Custom domain not attached yet::${message}`);
+                lines.push('### Smoke check skipped', '', message);
+                finish(0);
+              }
+              lastError = String(error?.cause ?? error);
+            }
+            if (info === undefined) console.log(`Attempt ${attempt}: ${lastError}`);
+          }
+          if (info === undefined) {
+            console.log(`::error title=Smoke check failed::GET ${server}/v1/info: ${lastError}`);
+            lines.push('### Smoke check failed', '', `GET ${server}/v1/info: ${lastError}`);
+            finish(1);
+          }
+
+          const json = JSON.stringify(info, null, 2);
+          console.log(json);
+          lines.push('### GET /v1/info', '', '```json', json, '```', '');
+
+          // /v1/info is built from the limits table, so it must publish exactly what was seeded.
+          const { rate = {}, ...caps } = info.limits ?? {};
+          const published = { ...caps, ...rate, retention_days: info.retention_days };
+          const wrong = Object.entries(seeded).filter(([key, value]) => published[key] !== value);
+          if (wrong.length > 0) {
+            const detail = wrong.map(([key, value]) => `${key}: seeded ${value}, published ${published[key]}`).join('; ');
+            console.log(`::error title=Published limits differ from the seed::${detail}`);
+            lines.push(`**Published limits differ from the seed:** ${detail}`);
+            finish(1);
+          }
+          lines.push('Every seeded limit is published.');
+          finish(0);
+          EOF

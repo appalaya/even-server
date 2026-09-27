@@ -138,7 +138,7 @@ function checkDrift(limits: Limits, env: Env): void {
     logEvent('warn', 'limits_table_differs_from_vars', {
       keys,
       effect:
-        'the table is published and enforced; re-seed it (npm run db:seed:remote) to apply the vars',
+        'the table is published and enforced; re-run the deploy workflow (or npm run db:seed locally) to apply the vars',
     });
   }
 }

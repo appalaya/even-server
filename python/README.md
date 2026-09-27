@@ -60,8 +60,8 @@ variables have the same names and defaults as the Cloudflare Worker. At start
 they are written to the `limits` table, and `/v1/info` and every check read them
 back from there, so what is published is what is enforced. **To change a limit,
 change the variable and restart the server**: every start re-seeds the table
-from the environment. (The Worker has no start, so there it is an explicit
-`npm run db:seed:remote`.) A limit row that goes missing from the table while the
+from the environment. (The Worker has no start, so there the deploy workflow
+re-seeds the table on every deploy.) A limit row that goes missing from the table while the
 server runs makes requests fail with `500` rather than guess a value.
 
 | Variable | Default | Meaning |

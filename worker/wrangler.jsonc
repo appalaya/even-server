@@ -1,8 +1,10 @@
 // Even sync server — Cloudflare Workers + D1 reference (see README.md).
 //
-// Every limit is a var below with its design.md default. The vars are NOT read by the Worker at request time:
-// `npm run db:seed` copies them into the D1 `limits` table, and /v1/info and every check read that table, so what is
-// published is what is enforced. After changing a var, re-seed (README.md, "Changing a limit").
+// Every limit is a var below with its design.md default. The vars are NOT read by the Worker at request time: the
+// deploy workflow (and `npm run db:seed` locally) copies them into the D1 `limits` table, and /v1/info and every check
+// read that table, so what is published is what is enforced (README.md, "Changing a limit").
+//
+// Production is deployed only by .github/workflows/deploy.yml (README.md, "Deploying").
 {
   "$schema": "./node_modules/wrangler/config-schema.json",
   "name": "even-sync",
@@ -10,6 +12,13 @@
   // The newest date the workerd bundled with @cloudflare/vitest-pool-workers supports, so tests, `wrangler dev` and
   // production run the same date. Nothing here depends on a newer flag.
   "compatibility_date": "2026-08-22",
+
+  // The public address is https://sync.even.appalaya.com, a Workers custom domain attached once in the dashboard
+  // (README.md, "Deploying"). There are deliberately no `routes`: with none, `wrangler deploy` leaves the Worker's
+  // domains as they are. workers.dev and Version (preview) URLs are off, so the custom domain is the only address;
+  // without these two lines a deploy with no routes turns workers.dev on.
+  "workers_dev": false,
+  "preview_urls": false,
 
   // Privacy (THREAT-MODEL.md, "What we log"): request URLs contain group ids, so nothing that records them is on.
   // The Worker's own console.log lines (method, route pattern, status, ms, limited) are kept; invocation logs, which
@@ -21,8 +30,8 @@
   },
   "logpush": false,
 
-  // `wrangler d1 create even` prints the database_id to paste here before the first deploy.
-  // Local development (`--local`, `wrangler dev`) needs no id.
+  // No database_id, on purpose: the deploy workflow looks the database up by name (creating it on the first run) and
+  // writes its id into the runner's copy of this file only. Local development (`--local`, `wrangler dev`) needs none.
   "d1_databases": [{ "binding": "DB", "database_name": "even" }],
 
   // Per-IP limiters (design.md, "Rate limiting"). Each `limit` MUST equal its EVEN_RATE_* var below; the seed script
@@ -57,8 +66,8 @@
     // Vars, D1 and rate limiters are not inherited by named environments, so all three are spelled out.
     "test": {
       // Its own local database, so conformance runs never touch the development data. The explicit id matters:
-      // without one, local D1 files are keyed by binding name and both environments would share a file. To deploy
-      // this environment as staging, replace it with the id printed by `wrangler d1 create even-test`.
+      // without one, local D1 files are keyed by binding name and both environments would share a file. This
+      // environment is local only; the deploy workflow deploys the top level and never `--env test`.
       "d1_databases": [{ "binding": "DB", "database_name": "even-test", "database_id": "local-even-test" }],
       "ratelimits": [
         { "name": "RATE_REQUESTS", "namespace_id": "4901", "simple": { "limit": 100000, "period": 60 } },
