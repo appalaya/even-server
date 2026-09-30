@@ -123,8 +123,12 @@ When the server returns an envelope it adds one field:
 ## 5. Transport rules
 
 - HTTPS is mandatory. Clients refuse `http://` server URLs and refuse
-  self-signed certificates. There is no exception for local development on a
-  device; use a tunnel or a real certificate.
+  self-signed certificates. The one exception is a development build of the
+  client reaching a server on the same machine or its private network
+  (loopback, 10/8, 172.16/12, 192.168/16) over plain `http://`, for the
+  reference server during development; keys are still derived from the
+  `https` form of the URL, and a release build has no such exception. For
+  anything else use a tunnel or a real certificate.
 - Requests and responses are `application/json; charset=utf-8`.
 - Authentication: `Authorization: Bearer <authToken base64url>` on every
   group-scoped request.
@@ -412,7 +416,8 @@ client's concern.
   envelopes with an unknown `v` or an unknown body version, since a future
   client may read them. Envelopes that fail authentication under the correct
   key are junk and MAY be discarded after a bounded number are kept.
-- Never send an `http://` request, never disable certificate validation.
+- Never send an `http://` request (outside the development-build exception
+  in §5), never disable certificate validation.
 
 ## 11. Versioning
 
