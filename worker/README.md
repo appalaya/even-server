@@ -107,7 +107,7 @@ Blocked-group opt-in, while `npm run dev:test` is running:
 
 ```sh
 ID=$(cd ../conformance && EVEN_SERVER_URL=http://127.0.0.1:8787 npm run --silent blocked-id)
-npx wrangler d1 execute even-test --local --env test \
+npx wrangler@4.141.0 d1 execute even-test --local --env test \
   --command "INSERT OR IGNORE INTO blocked (group_id, blocked_at) VALUES ('$ID', 0)"
 (cd ../conformance && EVEN_SERVER_URL=http://127.0.0.1:8787 EVEN_CONFORMANCE_BLOCKED_GROUP_ID=$ID npx vitest run)
 ```
@@ -373,18 +373,18 @@ A blocked group id answers `410 group_blocked` on every group route (after authe
 terminal. A plain delete is pointless: the next member who syncs recreates the group.
 
 Production's database is only on Cloudflare. Run the SQL below in the `even` database's Console in the dashboard
-(D1), or with Wrangler from a machine logged in to the account (`npx wrangler login`); `--remote` finds the database
+(D1), or with Wrangler from a machine logged in to the account (`npx wrangler@4.141.0 login`); `--remote` finds the database
 by name, so the id-free `wrangler.jsonc` works as it is. Neither is a deploy, and neither needs one.
 
 ```sh
 # block (the 43-character id from the request path, e.g. as given in an abuse report)
-npx wrangler d1 execute even --remote --command \
+npx wrangler@4.141.0 d1 execute even --remote --command \
   "INSERT OR IGNORE INTO blocked (group_id, blocked_at) VALUES ('<groupId>', unixepoch() * 1000)"
 # optionally purge what is stored now (otherwise expiry deletes it)
-npx wrangler d1 execute even --remote --command \
+npx wrangler@4.141.0 d1 execute even --remote --command \
   "DELETE FROM events WHERE group_id = '<groupId>'; DELETE FROM groups WHERE id = '<groupId>'"
 # unblock
-npx wrangler d1 execute even --remote --command "DELETE FROM blocked WHERE group_id = '<groupId>'"
+npx wrangler@4.141.0 d1 execute even --remote --command "DELETE FROM blocked WHERE group_id = '<groupId>'"
 ```
 
 Use `--local` instead of `--remote` for the local database.
@@ -403,7 +403,7 @@ batches, or once it has written 10,000 rows, and the next day's run carries on. 
 `src/db.ts`; raise them on a paid plan. The groups are found through the `groups_last_write_at` index, so a run reads
 only what it deletes.
 
-Try it locally with `npx wrangler dev --test-scheduled`, then `curl "http://127.0.0.1:8787/__scheduled?cron=17+3+*+*+*"`;
+Try it locally with `npx wrangler@4.141.0 dev --test-scheduled`, then `curl "http://127.0.0.1:8787/__scheduled?cron=17+3+*+*+*"`;
 the log shows `{"level":"info","event":"expiry","groups_deleted":…,"rows_written":…,"complete":true,"retention_days":…}`
 (`complete: false` means idle groups were left for the next run).
 
@@ -442,7 +442,7 @@ traces are off, and Logpush is off. What remains outside this code's control, an
 server's terms (PROTOCOL.md §9):
 
 - Cloudflare terminates TLS and sees full URLs, tokens and IPs in flight, and keeps its own platform analytics.
-- `npx wrangler tail` streams live invocations including request URLs to whoever runs it. It is not persisted, but do
+- `npx wrangler@4.141.0 tail` streams live invocations including request URLs to whoever runs it. It is not persisted, but do
   not pipe it to a file.
 - `wrangler dev` prints each request URL to your terminal (`[wrangler:info] POST /v1/groups/…/events 200`). Local only.
 
