@@ -42,6 +42,8 @@ export interface Info {
 
 export interface StoredEnvelope extends Envelope {
   seq: number;
+  /** When the server first stored the envelope in the current epoch, in Unix milliseconds (§4). */
+  received_at: number;
 }
 
 export interface AppendOk {
@@ -49,6 +51,8 @@ export interface AppendOk {
   duplicates: number;
   seq: number;
   epoch: string;
+  /** One per envelope in the request, in request order: the value stored for that id (§6.2). */
+  received_at: number[];
 }
 
 export interface ReadOk {

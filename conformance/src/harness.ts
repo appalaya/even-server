@@ -169,7 +169,15 @@ export function expectEpoch(epoch: unknown, context: string): asserts epoch is s
   expect(typeof epoch === 'string' && isB64url(epoch, 22), `epoch must be 22 base64url characters (§6.6), got ${JSON.stringify(epoch)}: ${context}`).toBe(true);
 }
 
-/** §6.2 response: 200 with integer accepted, duplicates and seq, and an epoch. `sent` checks accepted + duplicates. */
+/** A `received_at` value (§4): Unix milliseconds, a safe integer. How close it is to now is checked where it is known. */
+export function isArrival(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value > 0;
+}
+
+/**
+ * §6.2 response: 200 with integer accepted, duplicates and seq, an epoch, and a `received_at` array of safe integers.
+ * `sent` checks accepted + duplicates and that `received_at` has one value per envelope sent.
+ */
 export function expectAppendOk(reply: Reply, sent?: number): AppendOk {
   expectStatus(reply, 200);
   expect(isRecord(reply.json), show(reply)).toBe(true);
@@ -178,19 +186,28 @@ export function expectAppendOk(reply: Reply, sent?: number): AppendOk {
     expect(isSeq(body[field]), `"${field}" must be a non-negative integer: ${show(reply)}`).toBe(true);
   }
   expectEpoch(body.epoch, show(reply));
+  expect(
+    Array.isArray(body.received_at) && body.received_at.every(isArrival),
+    `"received_at" must be an array of Unix-millisecond safe integers (§6.2): ${show(reply)}`,
+  ).toBe(true);
   if (sent !== undefined) {
     expect(body.accepted + body.duplicates, `accepted + duplicates must equal the envelopes sent: ${show(reply)}`).toBe(sent);
+    expect(body.received_at.length, `"received_at" must hold one value per envelope sent (§6.2): ${show(reply)}`).toBe(sent);
   }
   return body;
 }
 
-/** §6.3 response: 200, events ascending by seq with {seq, id, v, n, c}, integer next, boolean more, epoch or null. */
+/**
+ * §6.3 response: 200, events ascending by seq with {seq, id, v, n, c, received_at}, integer next, boolean more, epoch
+ * or null. `received_at` never decreases along seq: equal within a request, greater for every later request (§4).
+ */
 export function expectReadOk(reply: Reply): ReadOk {
   expectStatus(reply, 200);
   expect(isRecord(reply.json), show(reply)).toBe(true);
   const body = reply.json as ReadOk;
   expect(Array.isArray(body.events), `"events" must be an array: ${show(reply)}`).toBe(true);
   let previous = 0;
+  let previousArrival = 0;
   for (const event of body.events) {
     const where = `event ${JSON.stringify(event).slice(0, 120)} in ${show(reply)}`;
     expect(isRecord(event), where).toBe(true);
@@ -201,6 +218,9 @@ export function expectReadOk(reply: Reply): ReadOk {
     expect(typeof event.v === 'number' && Number.isSafeInteger(event.v), `v: ${where}`).toBe(true);
     expect(typeof event.n === 'string' && isB64url(event.n, 32), `n: ${where}`).toBe(true);
     expect(typeof event.c === 'string' && isB64url(event.c), `c: ${where}`).toBe(true);
+    expect(isArrival(event.received_at), `received_at must be a Unix-millisecond safe integer (§4): ${where}`).toBe(true);
+    expect(event.received_at >= previousArrival, `received_at must not decrease along seq (§4): ${where}`).toBe(true);
+    previousArrival = event.received_at;
   }
   expect(isSeq(body.next), `"next" must be a non-negative integer: ${show(reply)}`).toBe(true);
   expect(typeof body.more, `"more" must be a boolean: ${show(reply)}`).toBe('boolean');
@@ -213,9 +233,53 @@ export function expectMissingGroup(page: ReadOk, since = 0): void {
   expect(page).toMatchObject({ events: [], next: since, more: false, epoch: null });
 }
 
-/** The envelope as sent: a stored envelope without the server-added `seq`. */
+/** The envelope as sent: a stored envelope without the server-added `seq` and `received_at`. */
 export function unsequenced(event: StoredEnvelope): Envelope {
   return { id: event.id, v: event.v, n: event.n, c: event.c };
+}
+
+/**
+ * How far a `received_at` may be from this machine's clock at the append. Servers keep a clock within a minute of
+ * UTC (§9); the rest allows for the machine running the suite being off too.
+ */
+export const CLOCK_TOLERANCE_MS = 5 * 60_000;
+
+/** Every value lies within CLOCK_TOLERANCE_MS of [before, after], this machine's clock around the append. */
+export function expectNearClock(values: readonly number[], before: number, after: number, context: string): void {
+  for (const value of values) {
+    expect(value, `${context}: received_at ${value} is more than 5 minutes before this machine's clock (${before})`).toBeGreaterThanOrEqual(
+      before - CLOCK_TOLERANCE_MS,
+    );
+    expect(value, `${context}: received_at ${value} is more than 5 minutes after this machine's clock (${after})`).toBeLessThanOrEqual(
+      after + CLOCK_TOLERANCE_MS,
+    );
+  }
+}
+
+/**
+ * §4 across requests: `batches[r]` are envelopes that the request acknowledged by `acks[r]` stored (none of them a
+ * duplicate), and `events` holds them all, pulled. Each request's envelopes share one `received_at`, its push
+ * response reported that same value for each, and the requests' values strictly increase in `seq` order, however
+ * the requests were sent.
+ */
+export function expectArrivalsPerRequest(events: readonly StoredEnvelope[], batches: readonly Envelope[][], acks: readonly AppendOk[]): void {
+  const byId = new Map(events.map((e) => [e.id, e]));
+  const requests = batches.map((batch, r) => {
+    const stored = batch.map((envelope) => byId.get(envelope.id));
+    const values = stored.map((e) => e?.received_at);
+    expect(values, `request ${r}: every envelope one request stores gets the same received_at (§4)`).toEqual(batch.map(() => values[0]));
+    expect(acks[r]?.received_at, `request ${r}: the push response reports the value pulled for each envelope (§6.2)`).toEqual(values);
+    return { r, firstSeq: stored[0]?.seq ?? -1, value: values[0] ?? -1 };
+  });
+  requests.sort((x, y) => x.firstSeq - y.firstSeq);
+  for (let i = 1; i < requests.length; i++) {
+    const earlier = requests[i - 1]!;
+    const later = requests[i]!;
+    expect(
+      later.value,
+      `request ${later.r} (seq ${later.firstSeq}…) must have a greater received_at than request ${earlier.r} (seq ${earlier.firstSeq}…), stored before it (§4)`,
+    ).toBeGreaterThan(earlier.value);
+  }
 }
 
 /** 1, 2, …, n */
