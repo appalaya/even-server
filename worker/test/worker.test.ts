@@ -7,7 +7,7 @@ import { createScheduledController } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as store from '../src/db';
-import { parseAppendBody } from '../src/envelope';
+import { firstOccurrences, parseAppendBody } from '../src/envelope';
 import worker, { expireIdleGroups } from '../src/index';
 import { readUnits } from '../src/ratelimit';
 import {
@@ -59,13 +59,21 @@ describe('append, read, delete', () => {
   it('round-trips, assigns seq 1..n, and recreates with a new epoch after delete', async () => {
     const group = await freshGroup();
     const sent = [envelope(), envelope(), envelope()];
-    const first = await body(await append(group, sent));
+    const before = Date.now();
+    const first = await body<{ epoch: string; received_at: number[] }>(await append(group, sent));
     expect(first).toMatchObject({ accepted: 3, duplicates: 0, seq: 3 });
     expect(first.epoch).toMatch(/^[A-Za-z0-9_-]{22}$/);
+    // The same field order as the Python reference: the two agree byte for byte in shape.
+    expect(Object.keys(first)).toEqual(['accepted', 'duplicates', 'seq', 'epoch', 'received_at']);
+    const [arrival] = first.received_at;
+    expect(first.received_at).toEqual([arrival, arrival, arrival]);
+    expect(arrival).toBeGreaterThanOrEqual(before);
+    expect(arrival).toBeLessThanOrEqual(Date.now());
 
     const page = await body<{ events: Array<Record<string, unknown>> }>(await read(group));
     expect(page).toMatchObject({ next: 3, more: false, epoch: first.epoch });
-    expect(page.events).toEqual(sent.map((e, i) => ({ seq: i + 1, ...e })));
+    expect(page.events).toEqual(sent.map((e, i) => ({ seq: i + 1, ...e, received_at: arrival })));
+    expect(Object.keys(page.events[0] ?? {})).toEqual(['seq', 'id', 'v', 'n', 'c', 'received_at']);
 
     expect(
       (await call('DELETE', `/v1/groups/${group.groupId}`, { token: group.token })).status,
@@ -94,6 +102,51 @@ describe('append, read, delete', () => {
       duplicates: 1,
       seq: 2,
     });
+  });
+
+  it('received_at: max(now, the previous request + 1), one value per request, the stored one for a duplicate, fresh after delete', async () => {
+    const group = await freshGroup();
+    const day = '2041-01-01';
+    const at = async (events: ReturnType<typeof envelope>[], nowMs: number): Promise<number[]> => {
+      const parsed = parseAppendBody({ events }, { max_batch: 25, max_event_bytes: 8192 });
+      const result = await store.append(env.DB, group.groupId, firstOccurrences(parsed), {
+        epoch: 'E'.repeat(22),
+        nowMs,
+        day,
+      });
+      return parsed.map((e) => result.receivedAt.get(e.id) ?? -1);
+    };
+    const lastWriteAt = async (): Promise<unknown> =>
+      env.DB.prepare('SELECT last_write_at FROM groups WHERE id = ?')
+        .bind(group.groupId)
+        .first('last_write_at');
+    const [a, b, c, d, e] = [envelope(), envelope(), envelope(), envelope(), envelope()];
+    try {
+      expect(await at([a, b, a], 5_000)).toEqual([5_000, 5_000, 5_000]);
+      // A clock behind the last request, then one equal to it: each request still arrives after the one before.
+      expect(await at([c, a, envelope({ id: c.id })], 4_000)).toEqual([5_001, 5_000, 5_001]);
+      expect(await at([d], 5_001)).toEqual([5_002]);
+      expect(await at([e], 9_000)).toEqual([9_000]);
+      // Duplicates only: the stored values, and nothing moves.
+      expect(await at([e, d, c, b, a], 20_000)).toEqual([9_000, 5_002, 5_001, 5_000, 5_000]);
+      expect(await lastWriteAt()).toBe(9_000);
+      const page = await body<{ events: Array<{ id: string; received_at: number }> }>(
+        await read(group),
+      );
+      expect(page.events.map((event) => [event.id, event.received_at])).toEqual([
+        [a.id, 5_000],
+        [b.id, 5_000],
+        [c.id, 5_001],
+        [d.id, 5_002],
+        [e.id, 9_000],
+      ]);
+      // Deleted and recreated: assigned afresh from the clock, not continued from the old incarnation.
+      await call('DELETE', `/v1/groups/${group.groupId}`, { token: group.token });
+      expect(await at([a, b], 1_000)).toEqual([1_000, 1_000]);
+      expect(await lastWriteAt()).toBe(1_000);
+    } finally {
+      await env.DB.prepare('DELETE FROM counters WHERE day = ?').bind(day).run();
+    }
   });
 
   it('stores v: 1.0 as the integer 1', async () => {
@@ -941,13 +994,14 @@ describe('D1 rows written by an append (the daily write budget is sized on these
         // One new event to a new group, not the day's first: 1 + 3 + 4, the worst case per event.
         const other = await freshGroup();
         expect((await stored(other.groupId, [envelope()], day, 5_000)).rowsWritten).toBe(8);
-        // last_write_at moved once per append, and never backwards.
+        // last_write_at moved once per append, and never backwards: an append whose clock is behind arrives 1 ms
+        // after the one before (received_at, design.md "Append").
         await stored(group.groupId, [envelope()], day, 2_500);
         expect(
           await env.DB.prepare('SELECT last_write_at FROM groups WHERE id = ?')
             .bind(group.groupId)
             .first('last_write_at'),
-        ).toBe(3_000);
+        ).toBe(3_001);
       });
     } finally {
       await env.DB.prepare('DELETE FROM counters WHERE day = ?').bind(day).run();
