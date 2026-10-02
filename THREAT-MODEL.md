@@ -21,6 +21,7 @@ document changes first.
 | **Sync server operator** | Reads the database and logs, sees every request. Includes us running the free server, and any self-hoster. |
 | **Hosting platform** | Cloudflare terminates TLS for the public server and the landing page. It can see tokens, IPs, and URLs in flight, and keeps its own access logs under its own retention. |
 | **Landing page operator** | Serves the JavaScript that reads the invite fragment at `even.appalaya.com/i`. Same party as the public server operator. A trusted component. |
+| **Contact page bot check** | Cloudflare Turnstile, on `even.appalaya.com/contact`. Its script runs in the page with the page's own access, and its challenge frame sees the IP and browser details. A trusted component. The page adds the script only once no invite can be on it: a pasted invite is cleared from its field the moment it is read, and the field stays closed from then on. |
 | **Other servers the group has used** | Any operator whose server a group synced through at some point. |
 | **Backup provider** | Apple and Google, holding the device backup that includes the app's local database and keychain items. |
 | **Network observer** | Sees TLS metadata: server hostname, timing, sizes. Cannot see inside TLS. |
@@ -81,8 +82,8 @@ review protect.
 | Mistyped invite code | Checksum in the invite; a corrupted code is rejected rather than silently joining an empty group. |
 | Server disappears | Every device holds the full log. Any member issues a new invite naming a new server; members who accept it move over and re-push. The group file export needs no server at all. |
 | Downgrade to plaintext HTTP | Client refuses non-HTTPS server URLs and refuses invalid certificates. Not configurable in a release build; a development build may use plain HTTP only to a server on the same machine or its private network (PROTOCOL.md §5). |
-| Landing page exfiltrates the fragment | The page is served with a strict Content Security Policy (no external scripts, no connections), no third-party or platform-injected scripts, and inserts the group name as text only. The page never sends the fragment anywhere. |
-| Plaintext reaches backups | The app writes no decrypted content to disk beyond each event's ordering timestamp, the group's name and currency (both also plaintext in the invite), and, while a server-copy delete is outstanding, that server's bearer token (which yields only a group id). Backups contain ciphertext, those things, and, on iOS, the group secrets in the keychain. |
+| Landing page exfiltrates the fragment | The page is served with a strict Content Security Policy (no external scripts, no connections), no third-party or platform-injected scripts, and inserts the group name as text only. The page never sends the fragment anywhere. An in-app browser's own scripts are outside this; see "Not defended." |
+| Plaintext reaches backups | The app writes these to disk in plaintext: each event's ordering timestamp; the group's name and currency (both also plaintext in the invite); the user's own member name and emoji (the `prefs` rows `me.name` and `me.emoji`, filled in when the user creates or joins a group; asset class 2); bookkeeping such as each group's server URL and the user's member id; and, while a server-copy delete is outstanding, that server's bearer token (which yields only a group id). The app writes no other decrypted content. Backups contain ciphertext, those things, and, on iOS, the group secrets in the keychain. |
 | Junk resurrects after takedown | An operator takedown is a blocklist entry answered with `410`, which clients treat as terminal and never self-heal. A plain delete would be undone by the next member who syncs. |
 
 ## Not defended, on purpose
@@ -103,19 +104,30 @@ review protect.
   self-host on a machine they control.
 - **A backup that contains the key.** On iOS the keychain is backed up, so an
   iCloud backup contains everything needed to read the group. On Android the
-  keystore-wrapped secrets are not restorable, so an Android backup contains
-  ciphertext only. This is stated on the privacy page. Users who need
-  otherwise can turn off device backup or enable end-to-end-encrypted backup
-  at the OS level.
+  keystore-wrapped secrets are not restorable, so an Android backup cannot
+  open a group: it holds ciphertext and the plaintext listed under "Plaintext
+  reaches backups", the user's own name and emoji included. This is stated on
+  the privacy page. Users who need otherwise can turn off device backup or
+  enable end-to-end-encrypted backup at the OS level.
 - **Lock-screen previews.** Background refresh hands decrypted activity text
   ("Maya added Dinner · 90.00") to the OS as a local notification, which the
   OS stores and may show on the lock screen. Users control that with the OS
   notification settings; the app's toggle turns the notifications off
   entirely.
+- **The app-switcher snapshot.** The OS keeps an image of the app's last
+  screen to show in its app switcher, and that image can show amounts and
+  names.
 - **Browser history.** Opening an invite link in a browser stores the full
   URL, fragment included, in history, which may sync to the browser vendor.
-  The app's Share sheet offers the code first for this reason; the link exists
-  for convenience.
+  The app leads with the link: the group's share menu offers "Share link" and
+  "Show QR code" (the QR encodes the link), and "Share link" is the primary
+  button on both invite cards. The code avoids browser history for those who
+  prefer it: "Copy code" sits beside "Share link" on the group screen's invite
+  card (shown until another member joins) and in Group settings under Invite.
+- **In-app browsers.** Chat and social apps often open links in their own
+  in-app browser, a WebView that can inject the app's own scripts into any
+  page. Those scripts are not bound by the page's CSP and can read the `/i`
+  fragment, and with it the invite.
 - **Forward secrecy.** One key per group for the group's lifetime. A leaked
   secret reads the whole history. Rotation limits the future, not the past.
 - **Deniability.** None claimed.
@@ -145,6 +157,9 @@ Consequences the design accepts:
 - The landing page host never receives the secret: it is in the URL fragment.
   The page's own script reads it, which is why that script is constrained as
   above.
+- The contact page reads a pasted invite only to work out the group id for a
+  report. It clears the field at once, sends only the id and server, and
+  loads Cloudflare Turnstile only after that.
 
 ## Abuse posture
 
