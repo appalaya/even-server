@@ -24,7 +24,7 @@ CREATE TABLE IF NOT EXISTS groups (
   id            TEXT PRIMARY KEY,       -- 43-char base64url
   epoch         TEXT NOT NULL,          -- 22-char base64url, random per (re)creation
   created_at    INTEGER NOT NULL,       -- unix ms
-  last_write_at INTEGER NOT NULL,       -- unix ms; drives expiry
+  last_write_at INTEGER NOT NULL,       -- unix ms: the latest append's arrival time (received_at); drives expiry
   bytes         INTEGER NOT NULL DEFAULT 0,   -- sum of events.size; maintained by trigger
   events        INTEGER NOT NULL DEFAULT 0    -- COUNT(events); maintained by trigger
 );
@@ -37,7 +37,7 @@ CREATE TABLE IF NOT EXISTS events (
   n          TEXT    NOT NULL,          -- nonce
   c          TEXT    NOT NULL,          -- ciphertext, base64url as received
   size       INTEGER NOT NULL,          -- decoded length of c + 64 (protocol section 4)
-  created_at INTEGER NOT NULL,
+  created_at INTEGER NOT NULL,          -- unix ms: received_at, the arrival time of the append that stored it
   PRIMARY KEY (group_id, seq),
   UNIQUE     (group_id, id)
 );
@@ -64,9 +64,10 @@ END;
 
 -- last_write_at is indexed (groups_last_write_at, below), and an UPDATE that assigns an indexed column rewrites its
 -- index entry even when the value does not change, which on D1 is a row written. So the counts are updated per event
--- and last_write_at only when it moves: once per append to an existing group, never for a group created by the
--- append (its row is inserted with it). It never moves backwards. Replaced on every run (DROP, then CREATE) so that a
--- database created with an earlier definition gets this one; that leaves data alone.
+-- and last_write_at only when it moves, and never backwards. An append sets last_write_at to its arrival time before
+-- its inserts (design.md, "Append"), so for an append this finds nothing to move; it keeps last_write_at at or above
+-- every created_at in the group, which the next arrival time relies on, whatever inserted the row. Replaced on every
+-- run (DROP, then CREATE) so that a database created with an earlier definition gets this one; that leaves data alone.
 DROP TRIGGER IF EXISTS events_count;
 CREATE TRIGGER events_count AFTER INSERT ON events
 BEGIN

@@ -199,7 +199,15 @@ async function appendEvents(request: Request, env: Env, route: Route): Promise<R
     duplicates: envelopes.length - result.accepted,
     seq: result.seq,
     epoch: result.epoch,
+    // One per envelope sent, in request order, repeats included: the value stored for its id (§6.2).
+    received_at: envelopes.map((e) => storedArrival(result, e.id)),
   });
+}
+
+function storedArrival(result: store.AppendResult, id: string): number {
+  const value = result.receivedAt.get(id);
+  if (value === undefined) throw new Error('stored event missing after append');
+  return value;
 }
 
 /** Reads at most `maxBytes` of body and parses it as JSON; anything else is `400 invalid_request`. */
