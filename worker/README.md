@@ -344,6 +344,51 @@ server's terms (PROTOCOL.md §9):
   not pipe it to a file.
 - `wrangler dev` prints each request URL to your terminal (`[wrangler:info] POST /v1/groups/…/events 200`). Local only.
 
+## Alerts
+
+The deploy's API token cannot create notifications, so the account owner sets these up once, by hand. What the
+Free plan offers, per Cloudflare's [available notifications](https://developers.cloudflare.com/notifications/notification-available/)
+(checked 2026-10-01):
+
+- **No notification type watches a Worker or D1.** None alerts on a Worker's error rate, its daily requests or D1's
+  daily rows. The error-rate alerts (Advanced Error Rate, Origin Error Rate, Traffic Anomalies) are Enterprise
+  only, and Usage Based Billing covers billed usage on paid plans; on Free nothing is billed, so it has nothing to
+  watch. Free accounts get notifications by email only.
+- **Cloudflare incidents: turn this on.** Dashboard → **Notifications** → **Add** → **Incident Alerts** (Cloudflare
+  Status) → **Select**. Name it `Even sync: Cloudflare incidents`, pick the components **Workers** and **D1**, keep
+  every impact level (minor, major, critical; incidents are rare enough that this is not noisy), enter the email
+  address to notify, **Create**. This tells you when an outage is Cloudflare's rather than the Worker's.
+- **The daily request cap**: there is nothing to set up. Users report that Cloudflare emails the account when
+  Workers requests near and pass the free 100,000 a day; this is not in the documentation and has not been
+  checked here. Past the cap, Cloudflare answers error 1027 until 00:00 UTC and the Worker logs nothing.
+- **Error-rate alerts through Workers Issues: off, on purpose.** Issues (open beta, free during the beta) records
+  every uncaught exception, `5xx` response and logged error, and an automation can send an issue to a webhook or
+  chat service once it passes an occurrence threshold (no email). It needs
+  `"observability": { "issues": { "enabled": true } }` in `wrangler.jsonc`, and the Issues documentation does not
+  say what an occurrence stores. If that includes the request URL, it stores group ids, which
+  [THREAT-MODEL.md](../THREAT-MODEL.md), "What we log", rules out. Check that before turning it on; if it passes,
+  an occurrence threshold of 1 sends one message for each new kind of failure (a tripped budget included), and
+  "recurrence after inactivity" of 24 hours one more when a failure returns after a quiet day.
+
+Without alerts, look in the dashboard: **Workers & Pages → even-sync → Metrics** (requests, errors) and **D1 →
+even → Metrics** (rows read and written per day, against the free 5 million and 100,000).
+
+### When the budget trips
+
+The Worker's only `503` is `over_budget`. It writes no separate event, only its request line:
+
+```
+{"method":"POST","route":"/v1/groups/{groupId}/events","status":503,"ms":…,"limited":false}
+```
+
+To see it, open **Workers & Pages → even-sync → Observability** and search for `"status":503`; Workers Logs keeps 3
+days on Free. The count behind it is in D1: in **D1 → even → Console**, run
+`SELECT day, writes FROM counters ORDER BY day DESC` (a week of days is kept). A day that tripped reads exactly
+the budget, `500`, because the trigger refuses every increment past it.
+
+D1's own daily limits are different: once one is spent, every request that queries D1 answers `500` and logs
+`{"level":"error","event":"unhandled_exception","route":…,"exception":…}` until 00:00 UTC.
+
 ## What local runs cannot show
 
 - **The real rate limiter.** Locally, `wrangler dev` simulates the bindings (a single process, exact counts). On
