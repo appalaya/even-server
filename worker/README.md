@@ -71,15 +71,16 @@ Output from a real run:
 
 ```
 {"protocol":[1],"limits":{"max_event_bytes":8192,"max_group_bytes":65536,"max_group_events":200,"max_batch":25,"max_page":50,"daily_write_budget":0,"rate":{"requests_per_minute":100000,"writes_per_minute":100000,"group_creates_per_minute":100000,"reads_per_minute":100000}},"retention_days":365,"push":false}
-{"accepted":1,"duplicates":0,"seq":1,"epoch":"VNQqhBoRLlq7Dvd7odF8Jw"}
-{"events":[{"seq":1,"id":"waxVrr-3SxjKe56OgC-TKA","v":1,"n":"7gzelImjbsGCEbu9c52NESKRTlvt_YG6","c":"a5QIlENnOWfg…"}],"next":1,"more":false,"epoch":"VNQqhBoRLlq7Dvd7odF8Jw"}
+{"accepted":1,"duplicates":0,"seq":1,"epoch":"IaLWA4Bj3bRP2wz060lm9g","received_at":[1790985001337]}
+{"events":[{"seq":1,"id":"MiCWbbM7tCAhFP9EPOmwTg","v":1,"n":"QGxbHmCaxCvkPhJSblR32JcpLky7bWbU","c":"nBZiuSj_CNbr…","received_at":1790985001337}],"next":1,"more":false,"epoch":"IaLWA4Bj3bRP2wz060lm9g"}
 204
-{"accepted":1,"duplicates":0,"seq":1,"epoch":"bPJM2j4OahN0JZeTsUeRGg"}
+{"accepted":1,"duplicates":0,"seq":1,"epoch":"f4mmtZ36WWnTanq489qmxQ","received_at":[1790985001375]}
 {"error":"invalid_envelope","message":"id must be 22 base64url characters","index":1} 400
 {"error":"unauthorized","message":"token does not match groupId"} 401
 ```
 
-After the delete, the same envelope is accepted again at `seq` 1 under a new epoch (§6.4, §6.6).
+After the delete, the same envelope is accepted again at `seq` 1 under a new epoch (§6.4, §6.6), with a new
+`received_at`: the time this server stored it, in Unix milliseconds, one value per append request (§4, §6.2).
 
 ## Running the conformance suite
 
@@ -288,10 +289,12 @@ daily expiry (at most about 10,000 rows a run, plus one group; [Expiry](#expiry)
 deploy's seed. A delete writes one row per event and one for the group as measured locally; if D1 also counts the
 deleted index entries, as its documentation suggests, it is up to 3 per event and 3 for the group. A group at the
 10,000-event cap costs 10,001 to 30,003 rows. Deletes are bounded by what is stored, not by the budget, so a day of several deletes
-of full groups can still reach the limit. Reads are not the constraint for appends: an append reads about 8 rows per
-new event plus 6, and about 12 more in its prelude, so a day at the budget reads at most about 170,000 of the
-5 million (all one-event appends). An append of duplicates only writes nothing and is not counted, but still reads
-about 5 rows per envelope; those are bounded per address by `EVEN_RATE_WRITES_PER_MINUTE`, not by the budget.
+of full groups can still reach the limit. Reads are not the constraint for appends: measured locally, an append's
+batch reads about 13 rows per new event plus 10 (21 to 23 for a one-event append), and its prelude 12 more, so a day
+at the budget reads at most about 50,000 × 35 = 1.75 million rows (all one-event appends to existing groups), 35% of
+the Free plan's 5 million a day. An append of duplicates only writes nothing and is not counted, but still reads
+about 11 rows per envelope (it looks up each id's stored `received_at` to report it); those are bounded per address
+by `EVEN_RATE_WRITES_PER_MINUTE`, not by the budget.
 
 To change the budget, edit the var and merge ([Changing a limit](#changing-a-limit)); the next deploy seeds it, and
 `/v1/info` publishes it as `limits.daily_write_budget`. Size it in events, with 8 rows written per event as the worst

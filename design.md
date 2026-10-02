@@ -42,7 +42,7 @@ CREATE TABLE groups (
   id            TEXT PRIMARY KEY,       -- 43-char base64url
   epoch         TEXT NOT NULL,          -- 22-char base64url, random per (re)creation
   created_at    INTEGER NOT NULL,       -- unix ms
-  last_write_at INTEGER NOT NULL,       -- unix ms; drives expiry
+  last_write_at INTEGER NOT NULL,       -- unix ms: the latest append's arrival time (received_at); drives expiry
   bytes         INTEGER NOT NULL DEFAULT 0,   -- Σ events.size; maintained by trigger
   events        INTEGER NOT NULL DEFAULT 0    -- COUNT(events); maintained by trigger
 );
@@ -55,7 +55,7 @@ CREATE TABLE events (
   n          TEXT    NOT NULL,          -- nonce
   c          TEXT    NOT NULL,          -- ciphertext, base64url as received
   size       INTEGER NOT NULL,          -- decoded length of c + 64 (protocol §4)
-  created_at INTEGER NOT NULL,
+  created_at INTEGER NOT NULL,          -- unix ms: received_at, the arrival time of the append that stored it
   PRIMARY KEY (group_id, seq),
   UNIQUE     (group_id, id)
 );
@@ -79,8 +79,10 @@ END;
 
 -- Two updates, not one: last_write_at is indexed (below), and assigning an
 -- indexed column rewrites its index entry, a D1 row written, even when the
--- value does not change. So last_write_at moves once per append to an
--- existing group (never for a group the append creates), and never backwards.
+-- value does not change. An append sets last_write_at to its arrival time
+-- before its inserts (Append, below), so for an append the second update
+-- finds nothing to move; it keeps last_write_at at or above every created_at
+-- in the group, whatever inserted the row, and never moves it backwards.
 CREATE TRIGGER events_count AFTER INSERT ON events
 BEGIN
   UPDATE groups SET bytes = bytes + NEW.size, events = events + 1 WHERE id = NEW.group_id;
@@ -157,24 +159,51 @@ with no rows.
                         WHERE NOT EXISTS (SELECT 1 FROM events WHERE group_id = ? AND id = j.value))
       WHERE n > 0
      ON CONFLICT (day) DO UPDATE SET writes = writes + excluded.writes;
-   INSERT OR IGNORE INTO groups (id, epoch, created_at, last_write_at) VALUES (?, ?, ?, ?);
+   -- the request's arrival time, for a group that exists and only if the request holds a new id
+   UPDATE groups SET last_write_at = MAX(:now, last_write_at + 1)
+    WHERE id = ? AND EXISTS (SELECT 1 FROM json_each(?) AS j
+                              WHERE NOT EXISTS (SELECT 1 FROM events WHERE group_id = ? AND id = j.value));
+   INSERT OR IGNORE INTO groups (id, epoch, created_at, last_write_at) VALUES (?, ?, :now, :now);
    -- one per envelope, in request order:
    INSERT OR IGNORE INTO events (group_id, seq, id, v, n, c, size, created_at)
-     SELECT ?, COALESCE(MAX(seq), 0) + 1, ?, ?, ?, ?, ?, ? FROM events WHERE group_id = ?;
-   SELECT epoch, events, (SELECT MAX(seq) FROM events WHERE group_id = ?) FROM groups WHERE id = ?;
+     SELECT ?, COALESCE(MAX(seq), 0) + 1, ?, ?, ?, ?, ?, (SELECT last_write_at FROM groups WHERE id = ?)
+       FROM events WHERE group_id = ?;
+   SELECT epoch, (SELECT MAX(seq) FROM events WHERE group_id = ?) FROM groups WHERE id = ?;
+   SELECT id, created_at FROM events WHERE group_id = ? AND id IN (SELECT value FROM json_each(?));
    ```
    Each insert computes its own `seq` from `MAX(seq)` inside the statement, so
    consecutive inserts in the batch get consecutive values. `INSERT OR IGNORE`
    skips duplicates by the `(group_id, id)` unique constraint without touching
-   `seq`. The counter statement runs first and counts exactly the inserts that
-   will change a row, since nothing else can write in between. A budget trigger
-   aborts the whole batch if the count would pass the daily budget, and the cap
-   trigger if any insert would exceed a cap; the batch rolls back, counter
-   included, and the handler maps `over_budget` to `503` and `group_full` to
-   `413`.
+   `seq` or the stored row. The counter statement runs first and counts exactly
+   the inserts that will change a row, since nothing else can write in between.
+   A budget trigger aborts the whole batch if the count would pass the daily
+   budget, and the cap trigger if any insert would exceed a cap; the batch rolls
+   back, counter and arrival time included, and the handler maps `over_budget`
+   to `503` and `group_full` to `413`.
 5. `accepted` = number of inserts that changed a row (from the driver's
-   per-statement change count); `duplicates` = envelopes − accepted. Return
-   `{ accepted, duplicates, seq, epoch }`.
+   per-statement change count); `duplicates` = envelopes − accepted;
+   `received_at` = the stored `created_at` of each envelope's id, in request
+   order, repeats included. Return `{ accepted, duplicates, seq, epoch,
+   received_at }`, in that order in both references.
+
+**Arrival time (`received_at`).** Each event's `created_at` is its
+`received_at` (protocol §4): every envelope one request stores gets the same
+value, `max(now, the group's previous value + 1)`, so it is equal within a
+request and strictly increasing across requests in `seq` order, however close
+together they arrive or however the clocks of the Worker's machines disagree.
+The previous value is the group's `last_write_at`: the batch advances it
+before its inserts and each insert copies it, so the value is decided once per
+request without an interactive transaction. A new group's row is inserted with
+`now`, which the inserts copy. An append whose every envelope is a duplicate
+stores nothing, so it leaves `last_write_at` (and expiry) alone and assigns
+nothing; it reports the values already stored, as every duplicate does. A
+stored row is never updated, so a value never changes within an epoch. A
+delete or expiry removes the group row with its events, so the next write
+starts again from `now`: a recreated group's values are fresh and no earlier
+than the recreate time. The `events_count` trigger keeps `last_write_at` at or
+above every `created_at`, so the rule holds for rows stored before it existed.
+This needs no schema change, and adds rows read but no rows written:
+`last_write_at` already moved once per append that stored anything.
 
 **Atomicity.** In D1, `batch()` runs its statements in one implicit
 transaction, and D1 serialises writes per database, so two concurrent appends
@@ -185,10 +214,13 @@ The conformance suite fires concurrent appends and checks the result.
 ### Read (`GET …/events`)
 
 ```sql
-SELECT seq, id, v, n, c FROM events
+SELECT seq, id, v, n, c, created_at AS received_at FROM events
  WHERE group_id = ? AND seq > ?
  ORDER BY seq LIMIT ?;          -- limit = clamp(requested, 1, max_page) + 1
 ```
+
+Each event is returned as `{ seq, id, v, n, c, received_at }`, in that order
+in both references.
 
 Fetch one row more than the limit; if it arrives, `more = true` and it is
 dropped from the response. `next` = last returned `seq`, else the request's
@@ -411,6 +443,13 @@ group ids, no IPs.
     contiguous
   - delete → 204 → read returns empty → append recreates with a **different
     epoch** and `seq` restarting at 1
+  - `received_at` on every pulled envelope (a safe integer within 5 minutes of
+    the runner's clock at the append) and one per envelope in the push
+    response, in request order, a duplicate reporting the stored value; stable
+    across re-reads and duplicate re-pushes; equal within a request and
+    strictly increasing across requests in `seq` order, in the concurrency
+    tests too; new and no earlier than the recreate time after a delete; the
+    same in push and pull
   - `Cache-Control: no-store` on every response
   - subscriptions → 501 when `/v1/info.push` is false; unknown route → 404;
     wrong method → 405
