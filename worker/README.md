@@ -132,7 +132,7 @@ Every limit is a var in `wrangler.jsonc`, with the same names and defaults as th
 | `EVEN_RATE_REQUESTS_PER_MINUTE` | `120` | `RATE_REQUESTS` binding, every request to a documented route |
 | `EVEN_RATE_WRITES_PER_MINUTE` | `60` | `RATE_WRITES` binding, appends |
 | `EVEN_RATE_GROUP_CREATES_PER_MINUTE` | `3` | `RATE_CREATES` binding, appends to a group with no row yet |
-| `EVEN_RATE_READS_PER_MINUTE` | `720`; **`25`** in `wrangler.jsonc`, the public server ([why](#event-reads-per-address)) | `RATE_READS` binding, event reads (`GET …/events`) in units of 100 D1 rows read |
+| `EVEN_RATE_READS_PER_MINUTE` | `720`; **`120`** in `wrangler.jsonc`, the public server ([why](#event-reads-per-address)) | `RATE_READS` binding, event reads (`GET …/events`) in units of 100 D1 rows read |
 | `EVEN_DAILY_WRITE_BUDGET` | `50000` ([why](#the-daily-write-budget)); `0` turns it off | `counters_budget` triggers, events stored per UTC day (duplicates not counted), all groups |
 | `EVEN_OPERATOR` | empty | `/v1/info` `operator` |
 | `EVEN_TERMS_URL` | empty | `/v1/info` `terms` |
@@ -276,7 +276,7 @@ append requests (500 × 104 = 52,000) allowed. Every other shape costs less:
 |---|---:|---:|
 | one-event appends, each creating a group | 8 × 50,000 + 1 = 400,001 | 24% |
 | one-event appends to existing groups | 7 × 50,000 + 1 = 350,001 | 21% |
-| full 25-event appends to existing groups | 260 × 103 + 1 = 26,781 | 27% |
+| full 25-event appends to existing groups | 2,000 × 103 + 1 = 206,001 | 12% |
 
 The budget is not sized at 4 rows an event (about 15,000 a day for the same share): a day of one-event appends to
 new groups would then write 120,001 rows and pass the limit. What 50,000 means in use: a group re-pushed in full after
@@ -320,7 +320,8 @@ So event reads have their own allowance per address, counted in **units of 100 r
 units, at least 1, so a read of E events costs ceil((14 + E) / 100): a quiet poll or a read of up to 86 events costs
 1, and a full page costs 6. The public server allows **120 units a minute** (`EVEN_RATE_READS_PER_MINUTE` and the `RATE_READS`
 binding; `/v1/info` publishes it as `limits.rate.reads_per_minute`). Every unit pays for at most 100 rows, so a whole
-day at the allowance reads at most 25 × 100 × 1,440 = **3,600,000 rows, 72%** of the quota, whatever size the reads
+day at the allowance reads at most 120 × 100 × 1,440 = **17,280,000 rows**, about 2% of the paid plan's 25 billion a month
+(it was 25 units, 3.6 million rows and 72% of the free plan's 5 million a day, until Workers Paid on 2 October 2026), whatever size the reads
 are. The published name stays: a read of up to 100 rows is one read, and only larger ones count more. The default
 for a self-hosted Worker is 720, 120 full pages a minute, which adds nothing to the request limit.
 
@@ -339,14 +340,15 @@ a read is never charged more than the whole allowance, so that a full page alway
 `EVEN_MAX_PAGE` is raised past what `EVEN_RATE_READS_PER_MINUTE` covers. Size the two together: a full page costs
 ceil((`max_page` + 14) / 100) units.
 
-What it means for a client: 25 quiet polls a minute per address. A phone that syncs six groups when it opens uses 6,
-so four phones behind one address (a household, an office, a mobile carrier's NAT) can open the app in the same
-minute before the fifth waits out a `429`; on a carrier that gives phones IPv6, each phone has its own /64 and its
-own 25. A download reads 4 full pages a minute (24 units), 2,000 events, so a group at the 10,000-event cap takes 5
-minutes. A `429` is transient: clients wait `Retry-After` and carry on (PROTOCOL.md §10).
+What it means for a client: 120 quiet polls a minute per address. A phone that syncs six groups when it opens uses 6,
+so twenty phones behind one address (a household, an office, a mobile carrier's NAT) can open the app in the same
+minute before the next waits out a `429`; on a carrier that gives phones IPv6, each phone has its own /64 and its
+own 120. A download reads 20 full pages a minute (120 units), 10,000 events, so a group at the 10,000-event cap takes
+about a minute. A `429` is transient: clients wait `Retry-After` and carry on (PROTOCOL.md §10).
 
-The worst case depends on the allowance alone: N units a minute is at most N × 144,000 rows a day. 34 is the most
-that stays under 5 million (4,896,000), with nothing left for other requests.
+The worst case depends on the allowance alone: N units a minute is at most N × 144,000 rows a day. On the free plan 34
+was the most that stayed under its 5 million a day (4,896,000); on Workers Paid the ceiling is a bill, not a cutoff: 120 units
+is about 17 million rows a day from one address, roughly two cents at the plan's read price.
 
 What the read limit does not cover, so that per-IP limits alone still cannot hold one determined client under the
 quota:

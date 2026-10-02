@@ -183,10 +183,10 @@ the store a poor one instead:
   group creations per minute. IPv6 keyed by /64.
 - Per IP, an allowance for event reads counted by size, in units of 100
   database rows: a poll with nothing new costs 1, a full page of 500 events
-  costs 6, and the public server allows 25 a minute. That is at most 3.6
-  million rows a day from one address, under the database's free 5 million,
-  so one client's event reads cannot spend the quota and stop everyone's
-  reads for the day. It does not hold many addresses, or one address using
+  costs 6, and the public server allows 120 a minute. That is at most 17
+  million rows a day from one address, a fraction of a percent of the paid
+  plan's monthly allowance, so one client's event reads cannot spend the
+  quota and stop everyone's reads. It does not hold many addresses, or one address using
   every other route at its limit too; those need a rate rule in front of the
   server or a paid plan.
 - A global daily write budget on the public server, counted in events stored
