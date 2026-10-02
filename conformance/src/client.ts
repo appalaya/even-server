@@ -14,7 +14,10 @@ export interface RateLimits {
   requests_per_minute: number;
   writes_per_minute: number;
   group_creates_per_minute: number;
-  /** Optional (§6.1): published only by servers that limit event reads separately. */
+  /**
+   * Optional (§6.1): published only by servers that limit event reads separately. A server may count a large read
+   * as several, so this is not a count of requests.
+   */
   reads_per_minute?: number;
 }
 

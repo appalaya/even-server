@@ -10,7 +10,7 @@ import { firstOccurrences, parseAppendBody } from './envelope';
 import { ApiError, invalidRequest, json, noContent } from './http';
 import { driftFromVars, infoDocument, maxBodyBytes, type Limits } from './limits';
 import { logEvent } from './log';
-import { allow, clientKey, rateLimited } from './ratelimit';
+import { allow, allowUnits, clientKey, rateLimited, readUnits } from './ratelimit';
 
 export type RouteKind = 'info' | 'events' | 'group' | 'subscriptions';
 
@@ -102,10 +102,10 @@ interface Prelude {
 
 /**
  * Every group-scoped request: groupId shape (400), bearer token (401), the per-IP request limiter and, for an event
- * read, the read limiter (429), then the blocklist (410). Auth runs before anything that touches a limiter or the
- * database, so an unauthenticated flood cannot consume a real group's creation budget or learn whether it exists.
- * The limiters run before the first D1 read (their thresholds are binding configuration, not table rows), so a
- * refused request costs no D1 rows.
+ * read, the first unit of the read limiter (429), then the blocklist (410). Auth runs before anything that touches a
+ * limiter or the database, so an unauthenticated flood cannot consume a real group's creation budget or learn
+ * whether it exists. The limiters run before the first D1 read (their thresholds are binding configuration, not
+ * table rows), so a refused request costs no D1 rows. An event read takes the rest of its units in readEvents.
  */
 async function prelude(
   request: Request,
@@ -266,7 +266,7 @@ function secondsUntilUtcMidnight(now: Date): number {
 const QUERY_INT = /^-?[0-9]{1,4000}$/;
 
 async function readEvents(request: Request, env: Env, url: URL, route: Route): Promise<Response> {
-  const { groupId, state } = await prelude(request, env, route, { reads: true });
+  const { groupId, state, key } = await prelude(request, env, route, { reads: true });
   const maxPage = state.limits.max_page;
   const since = queryInt(url, 'since', 0);
   const limit = queryInt(url, 'limit', maxPage);
@@ -274,7 +274,16 @@ async function readEvents(request: Request, env: Env, url: URL, route: Route): P
   if (since < 0 || since > Number.MAX_SAFE_INTEGER)
     throw invalidRequest('since must be a non-negative integer');
   if (limit < 1) throw invalidRequest('limit must be at least 1');
-  const page = await store.read(env.DB, groupId, since, Math.min(limit, maxPage));
+  const pageLimit = Math.min(limit, maxPage);
+  // The read limiter counts units of 100 D1 rows (README.md, "Event reads per address"). The prelude took the first
+  // before touching D1; the rest are taken here, before the events are read, so a read that does not fit the
+  // allowance reads nothing more. Never more than the whole allowance, so a full page fits in a fresh minute.
+  const units = Math.min(
+    readUnits(store.readRows(state, since, pageLimit)),
+    state.limits.reads_per_minute,
+  );
+  if (!(await allowUnits(env.RATE_READS, 'RATE_READS', key, units - 1))) throw rateLimited();
+  const page = await store.read(env.DB, groupId, since, pageLimit);
   return json({
     events: page.events,
     next: page.events.at(-1)?.seq ?? since,

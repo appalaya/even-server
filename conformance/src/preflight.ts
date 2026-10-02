@@ -23,7 +23,11 @@ export const RECOMMENDED_TEST_ENV = [
 
 export const LIMIT_NAMES = ['max_event_bytes', 'max_group_bytes', 'max_group_events', 'max_batch', 'max_page', 'daily_write_budget'] as const;
 export const RATE_NAMES = ['requests_per_minute', 'writes_per_minute', 'group_creates_per_minute'] as const;
-/** Rates a server publishes only if it enforces them (§6.1); when present they must be counts like the others. */
+/**
+ * Rates a server publishes only if it enforces them (§6.1); when present they must be counts like the others.
+ * `reads_per_minute` may count a large read as several (the reference servers: one per started 100 rows read), and
+ * the suite's reads are small (a page of at most max_page ≤ 197 events), so it is checked for shape only.
+ */
 export const OPTIONAL_RATE_NAMES = ['reads_per_minute'] as const;
 /** Limits that bound something and so must be at least 1 (daily_write_budget and the rates may be 0). */
 const POSITIVE_LIMITS = new Set<string>(['max_event_bytes', 'max_group_bytes', 'max_group_events', 'max_batch', 'max_page']);

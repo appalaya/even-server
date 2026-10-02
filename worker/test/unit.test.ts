@@ -11,7 +11,7 @@ import {
   LimitsMissing,
   maxBodyBytes,
 } from '../src/limits';
-import { ipKey } from '../src/ratelimit';
+import { ipKey, readUnits } from '../src/ratelimit';
 import { matchRoute } from '../src/routes';
 import { LIMIT_VARIABLES } from '../src/vars';
 import { envelope, randomB64, TEST_LIMITS } from './helpers';
@@ -182,6 +182,22 @@ describe('ipKey (rate-limit keys)', () => {
     ['1:2:3:4:5:6:7:8:9', '1:2:3:4:5:6:7:8:9'],
   ])('%s → %s', (address, key) => {
     expect(ipKey(address)).toBe(key);
+  });
+});
+
+describe('readUnits (the read limiter counts units of 100 D1 rows)', () => {
+  it.each([
+    [0, 1],
+    [12, 1], // a group with no row
+    [14, 1], // a quiet poll
+    [100, 1],
+    [101, 2],
+    [513, 6],
+    [514, 6], // a full page of 500 with more to come
+    [600, 6],
+    [601, 7],
+  ])('%i rows → %i units', (rows, units) => {
+    expect(readUnits(rows)).toBe(units);
   });
 });
 

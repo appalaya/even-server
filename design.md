@@ -125,7 +125,8 @@ Every group-scoped request runs the same prelude:
 2. Read the bearer token; `401 unauthorized` if not exactly 43 base64url chars.
 3. `expected = base64url(sha256(base64urlDecode(token)))`; compare with
    `groupId`; `401` on mismatch.
-4. Rate-limit check for the client IP (below). Auth runs first so that an
+4. Rate-limit check for the client IP (below), and for an event read the
+   first unit of its read allowance (see Read). Auth runs first so that an
    unauthenticated flood cannot consume the creation limiter for a real group.
    In the Worker this comes before any D1 read: the thresholds are binding
    configuration, so a refused request costs no database rows. The Python
@@ -196,6 +197,24 @@ dropped from the response. `next` = last returned `seq`, else the request's
 deliberate: a group nobody writes to has been settled and exported, or is
 abandoned, and every member still has it locally.
 
+**The read allowance.** Event reads are limited per IP in units of 100
+database rows read, counted as D1 counts them (`meta.rows_read`): a read costs
+`ceil(rows / 100)` units, at least 1. A read's rows are the prelude's (the 11
+`limits` rows and the group row), the group row again for the epoch, and the
+events after `since` up to the limit, plus one (the look-ahead row, or the
+index entry where the scan stops): 14 for a poll with nothing new (1 unit),
+514 for a full page of 500 with more to come (6 units). The cost is known
+before the page is read: the prelude reads the group's `events` count, and
+`seq` runs 1..`events` within an epoch with no gaps (events are deleted only
+with their group), so `events − since` events follow the cursor. The first
+unit is taken in the prelude; the rest after the `since`/`limit` checks and
+before the page is read, and if they do not fit the read is refused with
+`429` and reads nothing more. A read is never charged more than the whole
+allowance, so a full page always fits in a fresh minute. The Workers binding
+has no weight, so a unit is one `limit()` call and units taken before a
+refusal stay spent; the Python reference counts the rest all or nothing. Both
+compute the same rows, so they charge the same units.
+
 ### Delete (`DELETE …`)
 
 Delete events then the group row, in one batch. `204` regardless. The next
@@ -249,7 +268,7 @@ them at deploy or start.
 | `EVEN_RATE_REQUESTS_PER_MINUTE` | `120` | Per IP, all endpoints |
 | `EVEN_RATE_WRITES_PER_MINUTE` | `60` | Per IP, append. A whole group behind one NAT shares this, and everyone re-pushes at once after an epoch change, hence not lower |
 | `EVEN_RATE_GROUP_CREATES_PER_MINUTE` | `3` | Per IP, first write to a new group |
-| `EVEN_RATE_READS_PER_MINUTE` | `120` (public server: `5`) | Per IP, event reads (`GET …/events`). The default changes nothing beyond the request limit; the public server sets it for D1's daily rows-read quota, since a full page reads about 514 rows |
+| `EVEN_RATE_READS_PER_MINUTE` | `720` (public server: `25`) | Per IP, event reads (`GET …/events`) in units of 100 rows read: a poll with nothing new costs 1, a full page of 500 costs 6 (Read, above). The default, 120 full pages, changes nothing beyond the request limit; the public server sets it for D1's daily rows-read quota: 25 units is at most 3.6 million rows a day |
 | `EVEN_DAILY_WRITE_BUDGET` | `6500` | Append, global: events stored per UTC day, duplicates not counted |
 | `EVEN_TRUST_PROXY_HEADER` | unset | Python: `CF-Connecting-IP` or `X-Forwarded-For` |
 | `EVEN_OPERATOR` | unset | `/v1/info` |
@@ -297,10 +316,12 @@ is left (it has no daily row quota).
 - **Worker:** the Workers Rate Limiting binding supports 10- and 60-second
   periods only, which is why every rate is expressed per minute. Four
   limiters, keyed by client IP (`CF-Connecting-IP`, IPv6 truncated to /64):
-  requests, writes, creations, and event reads. Falls back to allow if a
+  requests, writes, creations, and event reads (one call per unit of 100
+  rows a read costs, since the binding has no weight). Falls back to allow if a
   binding is missing so a self-deployed Worker without them still works. The
   limits are approximate and per-location; that is fine for abuse control.
-- **Python:** an in-memory sliding window per key, same four limits. Behind
+- **Python:** an in-memory sliding window per key, same four limits, a read
+  counting its units at once. Behind
   Caddy, nginx, or a Cloudflare Tunnel every client shares one IP unless
   `EVEN_TRUST_PROXY_HEADER` names the header to read; the README says so
   loudly. Every line of that header is read and the right-most address wins,

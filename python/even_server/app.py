@@ -21,11 +21,11 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from . import __version__, auth, b64, logs
 from .config import Config
-from .db import GroupFull, GroupState, OverBudget, Store
+from .db import GroupFull, GroupState, OverBudget, Store, read_rows
 from .envelope import first_occurrences, parse_append_body
 from .errors import JSON, ApiError, framework_error, invalid_request, rate_limited
 from .limits import info_document
-from .ratelimit import RateLimiter, SlidingWindow, client_address, ip_key
+from .ratelimit import RateLimiter, SlidingWindow, client_address, ip_key, read_units
 
 EPOCH_BYTES = 16
 MAX_SEQ = 2**63 - 1  # SQLite INTEGER
@@ -65,15 +65,15 @@ def create_app(config: Config, *, store: Store | None = None, limiter: RateLimit
         lines = request.headers.getlist(config.trust_proxy_header) if config.trust_proxy_header else []
         return ip_key(client_address(peer, lines))
 
-    def enforce(key: str, *rules: tuple[SlidingWindow, int]) -> None:
-        if wait := limiter.check(key, *rules):
+    def enforce(key: str, *rules: tuple[SlidingWindow, int], cost: int = 1) -> None:
+        if wait := limiter.check(key, *rules, cost=cost):
             raise rate_limited(wait)
 
     async def prelude(request: Request, *, reads: bool = False) -> tuple[str, GroupState, str]:
         """design.md "Request handling": group id, token, rate limits (the
-        request limit, and for an event read the read limit too), then
-        blocklist. The thresholds live in the limits table, so the local
-        database is read first; the order clients see is the Worker's."""
+        request limit, and for an event read the first unit of the read
+        limit), then blocklist. The thresholds live in the limits table, so the
+        local database is read first; the order clients see is the Worker's."""
         group_id: str = request.path_params["groupId"]
         auth.check_group_id(group_id)
         auth.authenticate(group_id, request.headers.get("authorization"))
@@ -131,15 +131,22 @@ def create_app(config: Config, *, store: Store | None = None, limiter: RateLimit
 
     @app.get("/v1/groups/{groupId}/events")
     async def read_events(request: Request) -> JSON:
-        group_id, state, _ = await prelude(request, reads=True)
-        max_page = state.limits.max_page
+        group_id, state, key = await prelude(request, reads=True)
+        limits = state.limits
         since = _query_int(request, "since", 0)
-        limit = _query_int(request, "limit", max_page)
+        limit = _query_int(request, "limit", limits.max_page)
         if not 0 <= since <= MAX_SEQ:
             raise invalid_request("since must be a non-negative integer")
         if limit < 1:
             raise invalid_request("limit must be at least 1")
-        page = await run_in_threadpool(store.read, group_id, since, min(limit, max_page))
+        page_limit = min(limit, limits.max_page)
+        # The read limit counts units of 100 rows, as the Worker does; the
+        # prelude took the first, the rest are taken before the page is read.
+        # Never more than the whole allowance, so a full page always fits.
+        units = min(read_units(read_rows(state, since, page_limit)), limits.reads_per_minute)
+        if units > 1:
+            enforce(key, (limiter.reads, limits.reads_per_minute), cost=units - 1)
+        page = await run_in_threadpool(store.read, group_id, since, page_limit)
         return JSON({
             "events": page.events,
             "next": page.events[-1]["seq"] if page.events else since,

@@ -1,7 +1,7 @@
 /**
  * Per-IP rate limits (design.md, "Rate limiting") through four Workers Rate Limiting bindings with 60-second
  * periods: all requests, append requests, group creations, and event reads. Keyed by CF-Connecting-IP, IPv6 by
- * its /64.
+ * its /64. Event reads are counted in units of D1 rows read (README.md, "Event reads per address").
  *
  * The limits are approximate and per Cloudflare location, which is fine for abuse control. The key goes to the
  * platform's limiter and nowhere else: it is never logged and never stored in D1.
@@ -11,6 +11,14 @@ import { logEvent } from './log';
 import { RATE_PERIOD_SECONDS } from './vars';
 
 export type LimiterName = 'RATE_REQUESTS' | 'RATE_WRITES' | 'RATE_CREATES' | 'RATE_READS';
+
+/** D1 rows per read unit: an event read costs one unit for every started 100 rows it reads. */
+export const READ_UNIT_ROWS = 100;
+
+/** The read limiter's charge for a read of `rows` D1 rows: ceil(rows / 100), at least 1. */
+export function readUnits(rows: number): number {
+  return Math.max(1, Math.ceil(rows / READ_UNIT_ROWS));
+}
 
 export function rateLimited(): ApiError {
   // The binding does not say when its window ends; a full period is the honest upper bound.
@@ -98,6 +106,23 @@ export async function allow(
     warnOnce(name, 'ratelimit_binding_failed', error);
     return true;
   }
+}
+
+/**
+ * `units` hits against `limiter` for `key`: one `limit()` call each, since the binding has no weight, stopping at the
+ * first refusal. True if every one was allowed. Units taken before a refusal stay spent; the binding cannot give
+ * them back.
+ */
+export async function allowUnits(
+  limiter: RateLimit | undefined,
+  name: LimiterName,
+  key: string,
+  units: number,
+): Promise<boolean> {
+  for (let unit = 0; unit < units; unit++) {
+    if (!(await allow(limiter, name, key))) return false;
+  }
+  return true;
 }
 
 function warnOnce(binding: LimiterName, event: string, error?: unknown): void {

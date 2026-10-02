@@ -156,7 +156,7 @@ Example: `https://sync.even.appalaya.com`.
       "requests_per_minute": 120,
       "writes_per_minute": 60,
       "group_creates_per_minute": 3,
-      "reads_per_minute": 120
+      "reads_per_minute": 720
     }
   },
   "retention_days": 365,
@@ -176,9 +176,15 @@ is created or joined, cache it, refresh it on any `invalid_request`, and use it
 to show the server's name, limits, and retention in group settings. `operator`
 and `terms` are optional strings; `push` states whether §6.5 is implemented.
 Rate limits are per client IP and may be enforced approximately.
-`rate.reads_per_minute` limits event reads (§6.3) on their own; a server that
-does not limit them separately of other requests may leave it out, and clients
-that do not know it ignore it (§11).
+`rate.reads_per_minute` is optional. It limits event reads (§6.3) on their
+own; a server that does not limit them separately of other requests leaves it
+out, and clients that do not know it ignore it (§11). A server MAY count a read
+by its size, as one read for every started 100 rows it reads from its
+database, so that a read returning few events counts once and a full page
+counts several times; it then says so in its documentation. The reference
+servers do: a read of up to 86 events, one with nothing new included, counts
+once, and a full page of 500 counts six times. Clients honour `Retry-After`
+(§10) and need not compute the count.
 
 ### 6.2 `POST /v1/groups/{groupId}/events` — append events
 
@@ -380,8 +386,9 @@ client's concern.
 - **Limits.** Every limit the server enforces MUST appear in `/v1/info` and
   MUST be enforced as published.
 - **Rate limiting.** Servers SHOULD limit, per client IP: total requests,
-  write requests, and group creations, and MAY also limit event reads
-  (published as `rate.reads_per_minute`). Servers SHOULD key IPv6 clients by /64.
+  write requests, and group creations, and MAY also limit event reads,
+  counted by size if they choose (published as the optional
+  `rate.reads_per_minute`, §6.1). Servers SHOULD key IPv6 clients by /64.
   Operators should expect a whole group behind one NAT to share a bucket.
 - **Blocking.** Servers MAY keep a blocklist of group ids and answer every
   request for a blocked id with `410 group_blocked`. This is the takedown

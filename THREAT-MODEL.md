@@ -171,8 +171,18 @@ the store a poor one instead:
 - Event cap 8 KB, group cap 2 MB and 10,000 events, idle expiry after 12 months.
 - Per IP: requests per minute, a lower write-requests-per-minute limit, and
   group creations per minute. IPv6 keyed by /64.
-- A global daily write budget on the public server; past it, writes return
-  503 and reads continue. A quiet day for us, not a bill.
+- Per IP, an allowance for event reads counted by size, in units of 100
+  database rows: a poll with nothing new costs 1, a full page of 500 events
+  costs 6, and the public server allows 25 a minute. That is at most 3.6
+  million rows a day from one address, under the database's free 5 million,
+  so one client's event reads cannot spend the quota and stop everyone's
+  reads for the day. It does not hold many addresses, or one address using
+  every other route at its limit too; those need a rate rule in front of the
+  server or a paid plan.
+- A global daily write budget on the public server, counted in events stored
+  rather than requests: an envelope the group already holds costs nothing, so
+  devices re-pushing a log after an epoch change pay for it once. Past it,
+  writes return 503 and reads continue. A quiet day for us, not a bill.
 - No push, no realtime, no delivery guarantees: a bad messenger.
 - A published abuse contact and a one-statement takedown: add a group id to
   the blocklist. Expiry and plain deletion are undone by any active member;
@@ -190,7 +200,11 @@ request bodies, never tokens, never full URLs (they contain group ids), never
 IPs. On Cloudflare
 this means Workers invocation logging is disabled; the Python reference runs
 with the access log off and its README warns that a reverse proxy in front
-logs full URIs unless told not to.
+logs full URIs unless told not to. That includes errors: Caddy, in the Python
+reference's example setup, writes the request URI and the client's address to
+its error log whenever it fails a request itself (a 502 while the server
+restarts), with or without an access log, unless the site answers errors with
+`handle_errors`, as `Caddyfile.example` does.
 
 ## Review checklist
 

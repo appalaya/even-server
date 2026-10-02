@@ -77,6 +77,21 @@ class GroupState:
     limits: Limits
     blocked: bool
     exists: bool
+    events: int  # the group's event count; within an epoch seq runs 1..events (see read_rows)
+    rows_read: int  # rows the prelude read, counted as D1 counts them
+
+
+def read_rows(state: GroupState, since: int, limit: int) -> int:
+    """The rows an event read costs in all, counted as the Worker's D1 counts
+    them (`meta.rows_read`), so that both references charge a read the same
+    units of the read limit (worker/README.md, "Event reads per address"):
+    the prelude's rows, the group row for the epoch, and the events after
+    `since` up to `limit`, plus one (the look-ahead row that sets `more`, or
+    the index entry where the scan stops). Within an epoch seq runs 1..events
+    with no gaps, since events are only deleted with their group, so
+    `events - since` of them follow `since`. Known before the page is read."""
+    following = max(0, state.events - since)
+    return state.rows_read + (1 if state.exists else 0) + min(following, limit) + 1
 
 
 @dataclass(frozen=True, slots=True)
@@ -171,11 +186,16 @@ class Store:
 
     def group_state(self, group_id: str) -> GroupState:
         with self._snapshot() as conn:
-            return GroupState(
-                limits=self._limits(conn),
-                blocked=conn.execute("SELECT 1 FROM blocked WHERE group_id = ?", (group_id,)).fetchone() is not None,
-                exists=conn.execute("SELECT 1 FROM groups WHERE id = ?", (group_id,)).fetchone() is not None,
-            )
+            rows = conn.execute("SELECT key, value FROM limits").fetchall()
+            blocked = conn.execute("SELECT 1 FROM blocked WHERE group_id = ?", (group_id,)).fetchone() is not None
+            group = conn.execute("SELECT events FROM groups WHERE id = ?", (group_id,)).fetchone()
+        return GroupState(
+            limits=Limits.from_rows(rows),
+            blocked=blocked,
+            exists=group is not None,
+            events=group[0] if group is not None else 0,
+            rows_read=len(rows) + blocked + (group is not None),
+        )
 
     def append(
         self,

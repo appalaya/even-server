@@ -27,7 +27,9 @@ export const LIMIT_VARIABLES = [
     fallback: 3,
     minimum: 1,
   },
-  { variable: 'EVEN_RATE_READS_PER_MINUTE', key: 'reads_per_minute', fallback: 120, minimum: 1 },
+  // Event reads in units of 100 D1 rows; 720 = 120 requests a minute, each a full page of 500 (6 units), so the
+  // default adds nothing to the request limit. README.md, "Event reads per address".
+  { variable: 'EVEN_RATE_READS_PER_MINUTE', key: 'reads_per_minute', fallback: 720, minimum: 1 },
   // Events stored per UTC day, all groups; 0 = no budget. README.md, "The daily write budget".
   { variable: 'EVEN_DAILY_WRITE_BUDGET', key: 'daily_write_budget', fallback: 6500, minimum: 0 },
 ] as const;
