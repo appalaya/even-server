@@ -2,7 +2,7 @@
 import { describe, expect, it } from 'vitest';
 import { responseProblems } from './client.ts';
 import { client, expectStatus } from './harness.ts';
-import { infoProblems, LIMIT_NAMES, RATE_NAMES } from './preflight.ts';
+import { infoProblems, LIMIT_NAMES, OPTIONAL_RATE_NAMES, RATE_NAMES } from './preflight.ts';
 
 describe('§6.1 GET /v1/info', () => {
   it('answers 200 without any Authorization header, with Cache-Control: no-store and a JSON body', async () => {
@@ -29,6 +29,10 @@ describe('§6.1 GET /v1/info', () => {
     }
     for (const name of RATE_NAMES) {
       expect(Number.isSafeInteger(body.limits.rate[name]) && (body.limits.rate[name] as number) >= 0, `limits.rate.${name}`).toBe(true);
+    }
+    for (const name of OPTIONAL_RATE_NAMES) {
+      const value = body.limits.rate[name];
+      if (value !== undefined) expect(Number.isSafeInteger(value) && (value as number) >= 0, `limits.rate.${name}`).toBe(true);
     }
   });
 

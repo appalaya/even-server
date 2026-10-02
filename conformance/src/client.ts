@@ -14,6 +14,8 @@ export interface RateLimits {
   requests_per_minute: number;
   writes_per_minute: number;
   group_creates_per_minute: number;
+  /** Optional (§6.1): published only by servers that limit event reads separately. */
+  reads_per_minute?: number;
 }
 
 export interface Limits {

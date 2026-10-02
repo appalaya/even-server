@@ -47,6 +47,7 @@ Use these values for test runs. Both reference servers read the same names:
 | `EVEN_RATE_REQUESTS_PER_MINUTE` | `100000` | the suite makes a few hundred requests in seconds |
 | `EVEN_RATE_WRITES_PER_MINUTE` | `100000` | |
 | `EVEN_RATE_GROUP_CREATES_PER_MINUTE` | `100000` | one new group per test |
+| `EVEN_RATE_READS_PER_MINUTE` | `100000` | most tests read their group back, some page through it |
 | `EVEN_DAILY_WRITE_BUDGET` | `0` | a budget can run out mid-run (`503 over_budget`) |
 
 Leave `EVEN_MAX_EVENT_BYTES` and `EVEN_MAX_BATCH` at their defaults or change them. The suite reads `max_event_bytes`,
@@ -76,7 +77,7 @@ the `Cache-Control` header and an empty body.
 cd python
 EVEN_MAX_GROUP_BYTES=65536 EVEN_MAX_GROUP_EVENTS=200 EVEN_MAX_PAGE=50 \
 EVEN_RATE_REQUESTS_PER_MINUTE=100000 EVEN_RATE_WRITES_PER_MINUTE=100000 \
-EVEN_RATE_GROUP_CREATES_PER_MINUTE=100000 EVEN_DAILY_WRITE_BUDGET=0 \
+EVEN_RATE_GROUP_CREATES_PER_MINUTE=100000 EVEN_RATE_READS_PER_MINUTE=100000 EVEN_DAILY_WRITE_BUDGET=0 \
   .venv/bin/even-server --db /tmp/even-conformance.db --port 8787
 
 # in another shell

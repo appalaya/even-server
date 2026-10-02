@@ -68,8 +68,9 @@ def create_app(config: Config, *, store: Store | None = None, limiter: RateLimit
         if wait := limiter.check(key, *rules):
             raise rate_limited(wait)
 
-    async def prelude(request: Request) -> tuple[str, GroupState, str]:
-        """design.md "Request handling": group id, token, rate limit, then
+    async def prelude(request: Request, *, reads: bool = False) -> tuple[str, GroupState, str]:
+        """design.md "Request handling": group id, token, rate limits (the
+        request limit, and for an event read the read limit too), then
         blocklist. The thresholds live in the limits table, so the local
         database is read first; the order clients see is the Worker's."""
         group_id: str = request.path_params["groupId"]
@@ -77,7 +78,10 @@ def create_app(config: Config, *, store: Store | None = None, limiter: RateLimit
         auth.authenticate(group_id, request.headers.get("authorization"))
         state = await run_in_threadpool(store.group_state, group_id)
         key = client_key(request)
-        enforce(key, (limiter.requests, state.limits.requests_per_minute))
+        rules = [(limiter.requests, state.limits.requests_per_minute)]
+        if reads:
+            rules.append((limiter.reads, state.limits.reads_per_minute))
+        enforce(key, *rules)
         if state.blocked:
             raise ApiError(410, "group_blocked", "this group is blocked on this server")
         return group_id, state, key
@@ -126,7 +130,7 @@ def create_app(config: Config, *, store: Store | None = None, limiter: RateLimit
 
     @app.get("/v1/groups/{groupId}/events")
     async def read_events(request: Request) -> JSON:
-        group_id, state, _ = await prelude(request)
+        group_id, state, _ = await prelude(request, reads=True)
         max_page = state.limits.max_page
         since = _query_int(request, "since", 0)
         limit = _query_int(request, "limit", max_page)

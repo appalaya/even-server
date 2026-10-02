@@ -58,6 +58,24 @@ def test_the_rate_limit_answers_before_the_blocklist(make_client):
     assert client.get(group.events, headers=group.headers).status_code == 429
 
 
+def test_reads_per_minute_count_event_reads_only(make_client):
+    clock = FakeClock()
+    client = make_client(EVEN_RATE_READS_PER_MINUTE=2, limiter=RateLimiter(clock))
+    group = new_group()
+    assert client.post(group.events, json=batch(envelope()), headers=group.headers).status_code == 200
+    for _ in range(2):
+        assert client.get(group.events, headers=group.headers).status_code == 200
+    response = client.get(group.events, headers=group.headers)
+    assert response.status_code == 429 and response.json()["error"] == "rate_limited"
+    assert response.headers["retry-after"] == "60"
+    # Other routes are not reads.
+    assert client.post(group.events, json=batch(envelope()), headers=group.headers).status_code == 200
+    assert client.get("/v1/info").status_code == 200
+    assert client.delete(group.path, headers=group.headers).status_code == 204
+    clock.now += 60
+    assert client.get(group.events, headers=group.headers).status_code == 200
+
+
 def test_writes_per_minute(make_client):
     client = make_client(EVEN_RATE_WRITES_PER_MINUTE=2)
     group = new_group()

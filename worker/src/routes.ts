@@ -101,17 +101,24 @@ interface Prelude {
 }
 
 /**
- * Every group-scoped request: groupId shape (400), bearer token (401), the per-IP request limiter (429), then the
- * blocklist (410). Auth runs before anything that touches a limiter or the database, so an unauthenticated flood
- * cannot consume a real group's creation budget or learn whether it exists. The limiter runs before the first D1
- * read (its threshold is binding configuration, not a table row), so a refused request costs no D1 rows.
+ * Every group-scoped request: groupId shape (400), bearer token (401), the per-IP request limiter and, for an event
+ * read, the read limiter (429), then the blocklist (410). Auth runs before anything that touches a limiter or the
+ * database, so an unauthenticated flood cannot consume a real group's creation budget or learn whether it exists.
+ * The limiters run before the first D1 read (their thresholds are binding configuration, not table rows), so a
+ * refused request costs no D1 rows.
  */
-async function prelude(request: Request, env: Env, route: Route): Promise<Prelude> {
+async function prelude(
+  request: Request,
+  env: Env,
+  route: Route,
+  { reads = false }: { reads?: boolean } = {},
+): Promise<Prelude> {
   const groupId = decodeSegment(route.groupId ?? '');
   checkGroupId(groupId);
   await authenticate(groupId, request.headers.get('Authorization'));
   const key = clientKey(request);
   if (!(await allow(env.RATE_REQUESTS, 'RATE_REQUESTS', key))) throw rateLimited();
+  if (reads && !(await allow(env.RATE_READS, 'RATE_READS', key))) throw rateLimited();
   const state = await store.groupState(env.DB, groupId);
   checkDrift(state.limits, env);
   if (state.blocked)
@@ -259,7 +266,7 @@ function secondsUntilUtcMidnight(now: Date): number {
 const QUERY_INT = /^-?[0-9]{1,4000}$/;
 
 async function readEvents(request: Request, env: Env, url: URL, route: Route): Promise<Response> {
-  const { groupId, state } = await prelude(request, env, route);
+  const { groupId, state } = await prelude(request, env, route, { reads: true });
   const maxPage = state.limits.max_page;
   const since = queryInt(url, 'since', 0);
   const limit = queryInt(url, 'limit', maxPage);

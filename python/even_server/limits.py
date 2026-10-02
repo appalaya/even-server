@@ -29,6 +29,7 @@ class Limits:
     requests_per_minute: int
     writes_per_minute: int
     group_creates_per_minute: int
+    reads_per_minute: int
     retention_days: int
 
     def rows(self) -> list[tuple[str, int]]:
@@ -74,6 +75,7 @@ def info_document(limits: Limits, *, operator: str | None, terms: str | None) ->
                 "requests_per_minute": limits.requests_per_minute,
                 "writes_per_minute": limits.writes_per_minute,
                 "group_creates_per_minute": limits.group_creates_per_minute,
+                "reads_per_minute": limits.reads_per_minute,
             },
         },
         "retention_days": limits.retention_days,

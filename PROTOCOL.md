@@ -155,7 +155,8 @@ Example: `https://sync.even.appalaya.com`.
     "rate": {
       "requests_per_minute": 120,
       "writes_per_minute": 60,
-      "group_creates_per_minute": 3
+      "group_creates_per_minute": 3,
+      "reads_per_minute": 120
     }
   },
   "retention_days": 365,
@@ -175,6 +176,9 @@ is created or joined, cache it, refresh it on any `invalid_request`, and use it
 to show the server's name, limits, and retention in group settings. `operator`
 and `terms` are optional strings; `push` states whether §6.5 is implemented.
 Rate limits are per client IP and may be enforced approximately.
+`rate.reads_per_minute` limits event reads (§6.3) on their own; a server that
+does not limit them separately of other requests may leave it out, and clients
+that do not know it ignore it (§11).
 
 ### 6.2 `POST /v1/groups/{groupId}/events` — append events
 
@@ -376,7 +380,8 @@ client's concern.
 - **Limits.** Every limit the server enforces MUST appear in `/v1/info` and
   MUST be enforced as published.
 - **Rate limiting.** Servers SHOULD limit, per client IP: total requests,
-  write requests, and group creations. Servers SHOULD key IPv6 clients by /64.
+  write requests, and group creations, and MAY also limit event reads
+  (published as `rate.reads_per_minute`). Servers SHOULD key IPv6 clients by /64.
   Operators should expect a whole group behind one NAT to share a bucket.
 - **Blocking.** Servers MAY keep a blocklist of group ids and answer every
   request for a blocked id with `410 group_blocked`. This is the takedown

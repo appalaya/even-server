@@ -468,6 +468,42 @@ describe('rate limiting', () => {
     expect(refused.status).toBe(429);
   });
 
+  it('the read limiter counts event reads only, before D1, alongside the request limiter', async () => {
+    const group = await freshGroup();
+    const reads = fakeLimiter();
+    const requests = fakeLimiter();
+    const bindings = { env: { RATE_READS: reads, RATE_REQUESTS: requests } };
+    await append(group, [envelope()], bindings);
+    await read(group, '?since=0', bindings);
+    await read(group, '?since=1', bindings);
+    await call('GET', '/v1/info', bindings);
+    await call('DELETE', `/v1/groups/${group.groupId}`, { token: group.token, ...bindings });
+    await call('PUT', `/v1/groups/${group.groupId}/subscriptions`, {
+      token: group.token,
+      json: {},
+      ...bindings,
+    });
+    expect(reads.keys).toHaveLength(2);
+    expect(requests.keys).toHaveLength(6);
+
+    const unreachable = {
+      prepare: () => {
+        throw new Error('D1 was read');
+      },
+      batch: () => Promise.reject(new Error('D1 was read')),
+    } as unknown as D1Database;
+    const refused = await read(group, '', {
+      env: { DB: unreachable, RATE_READS: fakeLimiter(false) },
+    });
+    expect(refused.status).toBe(429);
+    expect(refused.headers.get('Retry-After')).toBe('60');
+    expect(await body(refused)).toMatchObject({ error: 'rate_limited' });
+    // Appends, deletes and /v1/info are not reads.
+    const noReads = { env: { RATE_READS: fakeLimiter(false) } };
+    expect((await append(group, [envelope()], noReads)).status).toBe(200);
+    expect((await call('GET', '/v1/info', noReads)).status).toBe(200);
+  });
+
   it('keys by CF-Connecting-IP, IPv6 by /64', async () => {
     const limiter = fakeLimiter();
     await call('GET', '/v1/info', {
@@ -488,7 +524,12 @@ describe('rate limiting', () => {
   it('a missing binding allows the request and is logged once per isolate', async () => {
     const group = await freshGroup();
     const without = {
-      env: { RATE_REQUESTS: undefined, RATE_WRITES: undefined, RATE_CREATES: undefined },
+      env: {
+        RATE_REQUESTS: undefined,
+        RATE_WRITES: undefined,
+        RATE_CREATES: undefined,
+        RATE_READS: undefined,
+      },
     };
     expect((await append(group, [envelope()], without)).status).toBe(200);
     expect((await append(group, [envelope()], without)).status).toBe(200);
@@ -496,6 +537,7 @@ describe('rate limiting', () => {
     const warnings = lines.filter((line) => line.event === 'ratelimit_binding_missing');
     expect(warnings.map((w) => w.binding).sort()).toEqual([
       'RATE_CREATES',
+      'RATE_READS',
       'RATE_REQUESTS',
       'RATE_WRITES',
     ]);

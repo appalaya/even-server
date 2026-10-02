@@ -75,6 +75,7 @@ server runs makes requests fail with `500` rather than guess a value.
 | `EVEN_RATE_REQUESTS_PER_MINUTE` | `120` | Per client IP, all requests. |
 | `EVEN_RATE_WRITES_PER_MINUTE` | `60` | Per client IP, append requests. |
 | `EVEN_RATE_GROUP_CREATES_PER_MINUTE` | `3` | Per client IP, first writes to new groups. |
+| `EVEN_RATE_READS_PER_MINUTE` | `120` | Per client IP, event reads (`GET …/events`). The default adds nothing to the request limit; the Cloudflare Worker sets 5 to protect its database's daily read quota, which a local SQLite file does not have. |
 | `EVEN_DAILY_WRITE_BUDGET` | `0` | Events stored per UTC day across the server, duplicates not counted. An append whose new events would pass it gets `503` and stores nothing; reads continue. `0` means no budget. |
 | `EVEN_TRUST_PROXY_HEADER` | unset | `X-Forwarded-For` or `CF-Connecting-IP`. **Read the warning below.** |
 | `EVEN_OPERATOR` | unset | Your name, shown to users in group settings. |
@@ -193,7 +194,7 @@ the server with test limits:
 EVEN_DB_PATH=/tmp/even-conformance.db \
 EVEN_MAX_GROUP_BYTES=65536 EVEN_MAX_GROUP_EVENTS=200 EVEN_MAX_PAGE=50 \
 EVEN_RATE_REQUESTS_PER_MINUTE=100000 EVEN_RATE_WRITES_PER_MINUTE=100000 \
-EVEN_RATE_GROUP_CREATES_PER_MINUTE=100000 \
+EVEN_RATE_GROUP_CREATES_PER_MINUTE=100000 EVEN_RATE_READS_PER_MINUTE=100000 \
 even-server
 ```
 

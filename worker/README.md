@@ -9,7 +9,7 @@ No framework and no runtime dependencies. Dev dependencies are `wrangler`, `type
 `@cloudflare/workers-types`, `vitest` and `@cloudflare/vitest-pool-workers`. Node 24 or newer.
 
 ```
-wrangler.jsonc          D1 binding, three rate limiters, cron, EVEN_* vars, observability (invocation logs off),
+wrangler.jsonc          D1 binding, four rate limiters, cron, EVEN_* vars, observability (invocation logs off),
                         workers.dev off
 schema.sql              tables and the cap, accounting and daily-budget triggers (design.md, "Storage model")
 scripts/seed-limits.mjs vars → seed-limits.sql (the `limits` table); refuses bad values and limiter mismatches
@@ -132,6 +132,7 @@ Every limit is a var in `wrangler.jsonc`, with the same names and defaults as th
 | `EVEN_RATE_REQUESTS_PER_MINUTE` | `120` | `RATE_REQUESTS` binding, every request to a documented route |
 | `EVEN_RATE_WRITES_PER_MINUTE` | `60` | `RATE_WRITES` binding, appends |
 | `EVEN_RATE_GROUP_CREATES_PER_MINUTE` | `3` | `RATE_CREATES` binding, appends to a group with no row yet |
+| `EVEN_RATE_READS_PER_MINUTE` | `120`; **`5`** in `wrangler.jsonc`, the public server ([why](#event-reads-per-address)) | `RATE_READS` binding, event reads (`GET …/events`) |
 | `EVEN_DAILY_WRITE_BUDGET` | `0` (off); **`7400`** in `wrangler.jsonc`, the public server ([why](#the-daily-write-budget)) | `counters_budget` triggers, events stored per UTC day (duplicates not counted), all groups |
 | `EVEN_OPERATOR` | empty | `/v1/info` `operator` |
 | `EVEN_TERMS_URL` | empty | `/v1/info` `terms` |
@@ -157,7 +158,7 @@ and keeps using the table.
 Locally, `npm run db:seed` (or `db:seed:test`) does the seeding; `wrangler dev` picks up config edits by itself.
 
 For the public server, set `EVEN_OPERATOR` and `EVEN_TERMS_URL` this way (`EVEN_DAILY_WRITE_BUDGET` is set). Each
-`ratelimits` `namespace_id` must be unique within the account; change them if another Worker already uses 4101–4103.
+`ratelimits` `namespace_id` must be unique within the account; change them if another Worker already uses 4101–4104.
 
 A note on raising `EVEN_MAX_BATCH`: an append is one prelude batch (3 statements) plus one write batch
 (`max_batch` + 3), plus 2 more on a `413`. If D1 counts each batched statement toward the per-invocation query
@@ -235,7 +236,7 @@ Worker has no public address at all, which is fine: nothing points at it yet.
 ### What the free plan covers
 
 Everything the deploy turns on runs on the Workers Free plan: the Worker (100,000 requests a day, 10 ms CPU per
-request), the cron trigger (5 per account on Free; this uses 1), the three Rate Limiting bindings (Cloudflare's
+request), the cron trigger (5 per account on Free; this uses 1), the four Rate Limiting bindings (Cloudflare's
 documentation lists no plan requirement or price for them), Workers Logs (200,000 events a day, kept 3 days) and
 D1 (500 MB per database, 50 queries per invocation, 5 million rows read and 100,000 rows written a day). Past a
 daily D1 limit, every query, reads included, fails until 00:00 UTC and the Worker answers `500`;
@@ -280,7 +281,7 @@ device's re-push is duplicates; a 3,400-event group takes 46% of a day, and a gr
 two days.
 
 The other 48,000 rows are for writes the budget does not count: deleting a group (`DELETE /v1/groups/{groupId}`), the
-daily expiry, and the 10 upserts of each deploy's seed. A delete writes one row per event and one for the group as
+daily expiry, and the 11 upserts of each deploy's seed. A delete writes one row per event and one for the group as
 measured locally; if D1 also counts the deleted index entries, as its documentation suggests, it is up to 3 per
 event. The headroom is 16,000 to 48,000 deleted events a day; a group at the 10,000-event cap costs 10,001 to 30,002
 rows. Deletes are bounded by what is stored, not by the budget, so a day of several deletes of full groups can still
@@ -289,17 +290,51 @@ about 12 more in its prelude, so a day at the budget reads at most about 200,000
 appends). An append of duplicates only writes nothing and is not counted, but still reads about 5 rows per
 envelope; those are bounded per address by `EVEN_RATE_WRITES_PER_MINUTE`, not by the budget.
 
-The per-IP limits do not protect the Workers Free cap of 100,000 requests a day, and are not meant to. One client
-at `EVEN_RATE_REQUESTS_PER_MINUTE` (120) could make 172,800 requests a day and use the whole cap in about 14 hours;
-holding one address under it would need 69 a minute or fewer, and two addresses would still reach it. Past the cap
-Cloudflare answers error 1027 until 00:00 UTC: a quiet day, not a bill. D1's 5 million rows read are similar: a
-full page (`max_page` 500) reads about 515 rows, so one client reading full pages at 120 a minute would spend the
-day's reads in about 80 minutes, and D1 would then refuse every query until 00:00 UTC. The write budget covers
-neither.
-
 To change the budget, edit the var and merge ([Changing a limit](#changing-a-limit)); the next deploy seeds it, and
 `/v1/info` publishes it as `limits.daily_write_budget`. Size it in events, with 7 rows written per event as the worst
 case.
+
+### Event reads per address
+
+D1's free 5 million rows read a day are the other quota one client could spend. Measured as `meta.rows_read` on
+local D1, a full page (`max_page` 500) reads 514 rows: 12 in the request prelude (the 11 rows of the `limits` table
+and the group row), 1 for the group's epoch, and `limit + 1` = 501 events. At the 120 requests a minute every route
+allows, one address reading full pages would spend the day's reads in 81 minutes, after which D1 refuses every
+query until 00:00 UTC.
+
+So `GET /v1/groups/{groupId}/events` has its own per-IP limit, **5 a minute** on the public server
+(`EVEN_RATE_READS_PER_MINUTE` and the `RATE_READS` binding; `/v1/info` publishes it as
+`limits.rate.reads_per_minute`), checked with the request limiter before any D1 read. A whole day of full pages at
+that limit reads 5 × 1,440 × 514 = **3,700,800 rows, 74%** of the quota. What it means for a client: a sync reads
+each group once when nothing is new, so five groups sync in a minute from one address and a sixth waits out
+`Retry-After: 60`; a download reads 500 events a page, 2,500 a minute, so a group at the 10,000-event cap takes
+4 minutes. A household or office behind one NAT shares the five.
+
+To allow more reads a minute for the same worst case, lower `EVEN_MAX_PAGE` with it: at 100, a full page reads
+114 rows, and 20 reads a minute come to 3,283,200 rows a day.
+
+What the read limit does not cover, so that per-IP limits alone still cannot hold one determined client under the
+quota:
+
+- Every other request reads too: 12 rows in a group route's prelude, 11 for `/v1/info`. At 120 a minute that is up
+  to 2,073,600 rows a day from one address without reading a single event, and about 5.7 million together with full
+  pages at the read limit.
+- An append of 25 duplicates stores nothing and is not counted by the budget, but reads about 140 rows with its
+  prelude; at `EVEN_RATE_WRITES_PER_MINUTE` (60 a minute) that is about 12 million rows a day.
+- Many addresses: every limit here is per address.
+
+Holding those takes a rate rule in front of the Worker, or a paid plan (next section).
+
+### The Workers request cap
+
+The per-IP limits do not protect the Workers Free cap of 100,000 requests a day, and are not meant to. One client
+at `EVEN_RATE_REQUESTS_PER_MINUTE` (120) could make 172,800 requests a day and use the whole cap in about 14 hours;
+holding one address under it would need 69 a minute or fewer, and two addresses would still reach it. Past the cap
+Cloudflare answers error 1027 until 00:00 UTC: a quiet day, not a bill. Neither the budget nor the per-IP limits
+can prevent that; a rate-limiting rule on the hostname `sync.even.appalaya.com` (dashboard: **Security → WAF → Rate
+limiting rules**) acts before the Worker runs, and is the account owner's to set up. The Free plan offers rate
+limiting rules in a limited form; check the current limits when creating one. The landing site's contact Worker
+shares the account's cap.
 
 ## Takedown (blocklist)
 
@@ -334,13 +369,14 @@ the log shows `{"level":"info","event":"expiry","groups_deleted":…,"retention_
 
 ## Rate limits and the daily budget
 
-- Three Workers Rate Limiting bindings with 60-second periods, keyed by `CF-Connecting-IP` (IPv6 by /64). A `429`
-  carries `Retry-After: 60`, the binding's period, since the binding does not report when its window ends. The
-  platform's limits are approximate and per Cloudflare location, which is fine for abuse control.
-- The order is: authentication, the request limiter, then D1 (`/v1/info`: the limiter, then the `limits` table). An
-  unauthenticated flood consumes no limiter for a real group, and a refused request costs no D1 rows: the thresholds
-  are binding configuration, so nothing is read to apply them. A blocked group's requests count like any other, so
-  past the limit they get `429` rather than `410`.
+- Four Workers Rate Limiting bindings with 60-second periods, keyed by `CF-Connecting-IP` (IPv6 by /64): every
+  request, appends, group creations, and event reads ([why](#event-reads-per-address)). A `429` carries
+  `Retry-After: 60`, the binding's period, since the binding does not report when its window ends. The platform's
+  limits are approximate and per Cloudflare location, which is fine for abuse control.
+- The order is: authentication, the request limiter (and for an event read the read limiter), then D1 (`/v1/info`:
+  the limiter, then the `limits` table). An unauthenticated flood consumes no limiter for a real group, and a
+  refused request costs no D1 rows: the thresholds are binding configuration, so nothing is read to apply them. A
+  blocked group's requests count like any other, so past the limit they get `429` rather than `410`.
 - The creation limiter is consulted only when the group had no row at the start of the request; the write limiter
   only on appends.
 - A missing binding, or a limiter call that throws, allows the request and logs `ratelimit_binding_missing` /
