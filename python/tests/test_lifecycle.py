@@ -121,7 +121,8 @@ def test_daily_write_budget_counts_events_not_appends(make_client):
             return db.execute("SELECT COALESCE(SUM(writes), 0) FROM counters").fetchone()[0]
 
     # Two new events (the repeat of `a` is one event): the count goes up by 2, not 1.
-    assert push(a, b, a).json() | {"epoch": None} == {"accepted": 2, "duplicates": 1, "seq": 2, "epoch": None}
+    assert push(a, b, a).json() | {"epoch": None, "received_at": None} == {
+        "accepted": 2, "duplicates": 1, "seq": 2, "epoch": None, "received_at": None}
     assert counted() == 2
     # Three new events would pass the budget by one: refused whole, nothing stored or counted.
     assert push(c, envelope(), envelope()).status_code == 503
@@ -133,7 +134,8 @@ def test_daily_write_budget_counts_events_not_appends(make_client):
     # On a spent day an append of duplicates only still succeeds and writes no counter row.
     with sqlite3.connect(client.app.state.store.path) as db:
         rows_before = db.execute("SELECT COUNT(*) FROM counters").fetchone()
-    assert push(a, b, c).json() | {"epoch": None} == {"accepted": 0, "duplicates": 3, "seq": 4, "epoch": None}
+    assert push(a, b, c).json() | {"epoch": None, "received_at": None} == {
+        "accepted": 0, "duplicates": 3, "seq": 4, "epoch": None, "received_at": None}
     assert counted() == 4
     with sqlite3.connect(client.app.state.store.path) as db:
         assert db.execute("SELECT COUNT(*) FROM counters").fetchone() == rows_before
@@ -272,6 +274,8 @@ def test_expiry_reads_idle_groups_through_the_last_write_at_index(client):
 
 
 def test_last_write_at_moves_once_per_append_and_never_backwards(make_client):
+    """An append whose clock is behind arrives 1 ms after the one before
+    (received_at, design.md "Append")."""
     client = make_client()
     store = client.app.state.store
     group = new_group()
@@ -281,7 +285,7 @@ def test_last_write_at_moves_once_per_append_and_never_backwards(make_client):
     e = envelope()
     store.append(group.id, [stored()], epoch="E" * 22, now_ms=1_000, day="2030-01-01")
     with sqlite3.connect(store.path) as db:
-        assert db.execute("SELECT last_write_at, events FROM groups").fetchone() == (2_000, 2)
+        assert db.execute("SELECT last_write_at, events FROM groups").fetchone() == (2_001, 2)
 
 
 def test_one_connection_for_the_life_of_the_store(client, monkeypatch):

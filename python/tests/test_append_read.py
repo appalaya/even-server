@@ -1,26 +1,65 @@
+import time
+
 import pytest
 
+from even_server.envelope import Envelope, first_occurrences
 from support import batch, envelope, new_group, read_all
 
 
 def test_round_trip(client):
     group = new_group()
     sent = [envelope(size=17), envelope(size=300), envelope(size=8192)]
+    before = time.time_ns() // 1_000_000
     response = client.post(group.events, json=batch(*sent), headers=group.headers)
+    after = time.time_ns() // 1_000_000
     assert response.status_code == 200
     ack = response.json()
-    assert ack.keys() == {"accepted", "duplicates", "seq", "epoch"}
+    # The same field order as the Worker: the two agree byte for byte in shape.
+    assert list(ack) == ["accepted", "duplicates", "seq", "epoch", "received_at"]
     assert (ack["accepted"], ack["duplicates"], ack["seq"]) == (3, 0, 3)
     assert len(ack["epoch"]) == 22
+    arrival = ack["received_at"][0]
+    assert ack["received_at"] == [arrival] * 3
+    assert before <= arrival <= after
 
     body = client.get(group.events, headers=group.headers).json()
     assert body == {
-        "events": [{"seq": i + 1, **e} for i, e in enumerate(sent)],
+        "events": [{"seq": i + 1, **e, "received_at": arrival} for i, e in enumerate(sent)],
         "next": 3,
         "more": False,
         "epoch": ack["epoch"],
     }
-    assert list(body["events"][0]) == ["seq", "id", "v", "n", "c"]
+    assert list(body["events"][0]) == ["seq", "id", "v", "n", "c", "received_at"]
+
+
+def test_received_at_is_one_value_per_request_kept_for_duplicates_and_fresh_after_delete(client):
+    """max(now, the previous request's value + 1), assigned once with seq."""
+    store = client.app.state.store
+    group = new_group()
+
+    def at(envelopes, now_ms):
+        parsed = [Envelope(id=e["id"], v=1, n=e["n"], c=e["c"], size=320) for e in envelopes]
+        result = store.append(group.id, first_occurrences(parsed), epoch="E" * 22, now_ms=now_ms, day="2041-01-01")
+        return [result.received_at[e.id] for e in parsed]
+
+    def last_write_at():
+        return store._conn.execute("SELECT last_write_at FROM groups WHERE id = ?", (group.id,)).fetchone()[0]
+
+    a, b, c, d, e = (envelope() for _ in range(5))
+    assert at([a, b, a], 5_000) == [5_000] * 3
+    # A clock behind the last request, then one equal to it: each request still arrives after the one before.
+    assert at([c, a, envelope(id=c["id"])], 4_000) == [5_001, 5_000, 5_001]
+    assert at([d], 5_001) == [5_002]
+    assert at([e], 9_000) == [9_000]
+    # Duplicates only: the stored values, and nothing moves.
+    assert at([e, d, c, b, a], 20_000) == [9_000, 5_002, 5_001, 5_000, 5_000]
+    assert last_write_at() == 9_000
+    assert [(x["id"], x["received_at"]) for x in read_all(client, group)] == [
+        (a["id"], 5_000), (b["id"], 5_000), (c["id"], 5_001), (d["id"], 5_002), (e["id"], 9_000)]
+    # Deleted and recreated: assigned afresh from the clock, not continued from the old incarnation.
+    assert client.delete(group.path, headers=group.headers).status_code == 204
+    assert at([a, b], 1_000) == [1_000, 1_000]
+    assert last_write_at() == 1_000
 
 
 def test_seq_continues_across_requests(client):
@@ -81,7 +120,9 @@ def test_duplicates_within_one_request_are_stored_once(client):
     a_again = envelope(id=a["id"])  # same id, different content
     ack = client.post(group.events, json=batch(a, a_again, b), headers=group.headers).json()
     assert (ack["accepted"], ack["duplicates"], ack["seq"]) == (2, 1, 2)
-    assert read_all(client, group) == [{"seq": 1, **a}, {"seq": 2, **b}]
+    t = ack["received_at"][0]
+    assert ack["received_at"] == [t, t, t]
+    assert read_all(client, group) == [{"seq": 1, **a, "received_at": t}, {"seq": 2, **b, "received_at": t}]
 
 
 def test_duplicates_across_requests_are_ignored_and_never_replace_content(client):
@@ -91,7 +132,9 @@ def test_duplicates_across_requests_are_ignored_and_never_replace_content(client
     c = envelope()
     ack = client.post(group.events, json=batch(envelope(id=a["id"]), c), headers=group.headers).json()
     assert (ack["accepted"], ack["duplicates"], ack["seq"], ack["epoch"]) == (1, 1, 2, first["epoch"])
-    assert read_all(client, group) == [{"seq": 1, **a}, {"seq": 2, **c}]
+    t_a, t_c = first["received_at"][0], ack["received_at"][1]
+    assert ack["received_at"] == [t_a, t_c] and t_c > t_a  # the duplicate reports its stored value
+    assert read_all(client, group) == [{"seq": 1, **a, "received_at": t_a}, {"seq": 2, **c, "received_at": t_c}]
 
 
 def test_duplicates_only_batch_is_acknowledged(client):
@@ -100,7 +143,8 @@ def test_duplicates_only_batch_is_acknowledged(client):
     first = client.post(group.events, json=batch(a, b), headers=group.headers).json()
     response = client.post(group.events, json=batch(b, a, b), headers=group.headers)
     assert response.status_code == 200
-    assert response.json() == {"accepted": 0, "duplicates": 3, "seq": 2, "epoch": first["epoch"]}
+    t = first["received_at"][0]
+    assert response.json() == {"accepted": 0, "duplicates": 3, "seq": 2, "epoch": first["epoch"], "received_at": [t] * 3}
 
 
 def test_integral_float_version_is_the_same_json_number(client):

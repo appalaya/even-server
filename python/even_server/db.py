@@ -26,9 +26,35 @@ from .limits import Limits
 
 SCHEMA = files(__package__).joinpath("schema.sql").read_text("utf-8")
 
+# The request's arrival time (`received_at`, PROTOCOL.md section 4; design.md
+# "Append"), as in the Worker, held in groups.last_write_at: max(now, the
+# previous value + 1). Run before the group row is inserted, so it only ever
+# advances a group that already exists (a new group's row is inserted with
+# `now`), and only when the request holds an id the group does not, so an
+# append of duplicates only changes nothing. The events_count trigger keeps
+# last_write_at at or above every created_at in the group, so the new value is
+# above every value an earlier request stored.
+ADVANCE_ARRIVAL = """
+UPDATE groups SET last_write_at = MAX(?1, last_write_at + 1)
+ WHERE id = ?2 AND EXISTS (
+   SELECT 1 FROM json_each(?3) AS j
+    WHERE NOT EXISTS (SELECT 1 FROM events WHERE events.group_id = ?2 AND events.id = j.value)
+ )
+"""
+
+# seq from MAX(seq) inside the statement, so consecutive inserts get consecutive
+# values; created_at is the request's arrival time from the group row, the same
+# for every insert of the request. A duplicate id is ignored and keeps its row.
 INSERT_EVENT = """
 INSERT OR IGNORE INTO events (group_id, seq, id, v, n, c, size, created_at)
-  SELECT ?, COALESCE(MAX(seq), 0) + 1, ?, ?, ?, ?, ?, ? FROM events WHERE group_id = ?
+  SELECT ?1, COALESCE(MAX(seq), 0) + 1, ?2, ?3, ?4, ?5, ?6, (SELECT last_write_at FROM groups WHERE id = ?1)
+    FROM events WHERE group_id = ?1
+"""
+
+# The stored arrival time of each of the request's ids, new or already stored.
+STORED_ARRIVALS = """
+SELECT id, created_at FROM events
+ WHERE group_id = ?1 AND id IN (SELECT value FROM json_each(?2))
 """
 
 # The daily write budget counts events stored (design.md, "Global write budget"),
@@ -99,6 +125,9 @@ class AppendResult:
     accepted: int
     seq: int
     epoch: str
+    # The stored received_at (events.created_at) of every id in the request,
+    # those it found already stored included: what the response reports.
+    received_at: dict[str, int]
 
 
 @dataclass(frozen=True, slots=True)
@@ -208,18 +237,21 @@ class Store:
     ) -> AppendResult:
         """Store `envelopes` (already de-duplicated within the request) atomically.
 
-        `epoch` is used only if this write creates the group. Raises `OverBudget`
-        (a budget trigger refused the day's count of events stored) or
-        `GroupFull` (the cap trigger refused an insert); either way nothing is
-        stored and the count is unchanged.
+        `epoch` is used only if this write creates the group. Every envelope it
+        stores gets the request's arrival time, max(now_ms, the group's previous
+        one + 1). Raises `OverBudget` (a budget trigger refused the day's count
+        of events stored) or `GroupFull` (the cap trigger refused an insert);
+        either way nothing is stored and the count is unchanged.
         """
+        ids = json.dumps([e.id for e in envelopes])
         with self._write() as conn:
             try:
-                conn.execute(COUNT_NEW_EVENTS, (day, json.dumps([e.id for e in envelopes]), group_id))
+                conn.execute(COUNT_NEW_EVENTS, (day, ids, group_id))
             except sqlite3.IntegrityError as exc:
                 if "over_budget" not in str(exc):
                     raise
                 raise OverBudget() from None
+            conn.execute(ADVANCE_ARRIVAL, (now_ms, group_id, ids))
             conn.execute(
                 "INSERT OR IGNORE INTO groups (id, epoch, created_at, last_write_at) VALUES (?, ?, ?, ?)",
                 (group_id, epoch, now_ms, now_ms),
@@ -227,7 +259,7 @@ class Store:
             accepted = 0
             for e in envelopes:
                 try:
-                    cursor = conn.execute(INSERT_EVENT, (group_id, e.id, e.v, e.n, e.c, e.size, now_ms, group_id))
+                    cursor = conn.execute(INSERT_EVENT, (group_id, e.id, e.v, e.n, e.c, e.size))
                 except (sqlite3.IntegrityError, sqlite3.OperationalError) as exc:
                     if "group_full" not in str(exc):
                         raise
@@ -237,7 +269,10 @@ class Store:
                 "SELECT epoch, (SELECT MAX(seq) FROM events WHERE group_id = ?) FROM groups WHERE id = ?",
                 (group_id, group_id),
             ).fetchone()
-        return AppendResult(accepted=accepted, seq=seq or 0, epoch=epoch_now)
+            received_at = dict(conn.execute(STORED_ARRIVALS, (group_id, ids)).fetchall())
+        if len(received_at) != len(envelopes):
+            raise RuntimeError("stored event missing after append")
+        return AppendResult(accepted=accepted, seq=seq or 0, epoch=epoch_now, received_at=received_at)
 
     @staticmethod
     def _full_reason(conn: sqlite3.Connection, group_id: str, size: int) -> str:
@@ -253,10 +288,12 @@ class Store:
             if row is None:
                 return Page(events=[], more=False, epoch=None)
             rows = conn.execute(
-                "SELECT seq, id, v, n, c FROM events WHERE group_id = ? AND seq > ? ORDER BY seq LIMIT ?",
+                "SELECT seq, id, v, n, c, created_at FROM events WHERE group_id = ? AND seq > ? ORDER BY seq LIMIT ?",
                 (group_id, since, limit + 1),
             ).fetchall()
-        events = [{"seq": seq, "id": id_, "v": v, "n": n, "c": c} for seq, id_, v, n, c in rows[:limit]]
+        # The protocol's field order, the same as the Worker's.
+        events = [{"seq": seq, "id": id_, "v": v, "n": n, "c": c, "received_at": received_at}
+                  for seq, id_, v, n, c, received_at in rows[:limit]]
         return Page(events=events, more=len(rows) > limit, epoch=row[0])
 
     def delete(self, group_id: str) -> None:
