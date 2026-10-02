@@ -50,6 +50,14 @@ def test_group_routes_count_against_requests_after_auth(make_client):
     assert client.get(group.events, headers=group.headers).status_code == 429
 
 
+def test_the_rate_limit_answers_before_the_blocklist(make_client):
+    client = make_client(EVEN_RATE_REQUESTS_PER_MINUTE=1)
+    group = new_group()
+    client.app.state.store.block(group.id, 0)
+    assert client.get(group.events, headers=group.headers).status_code == 410  # counted like any request
+    assert client.get(group.events, headers=group.headers).status_code == 429
+
+
 def test_writes_per_minute(make_client):
     client = make_client(EVEN_RATE_WRITES_PER_MINUTE=2)
     group = new_group()

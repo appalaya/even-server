@@ -101,20 +101,21 @@ interface Prelude {
 }
 
 /**
- * Every group-scoped request: groupId shape (400), bearer token (401), blocklist (410), then the per-IP request
- * limiter (429). Auth runs before anything that touches the database or a limiter, so an unauthenticated flood
- * cannot consume a real group's creation budget or learn whether it exists.
+ * Every group-scoped request: groupId shape (400), bearer token (401), the per-IP request limiter (429), then the
+ * blocklist (410). Auth runs before anything that touches a limiter or the database, so an unauthenticated flood
+ * cannot consume a real group's creation budget or learn whether it exists. The limiter runs before the first D1
+ * read (its threshold is binding configuration, not a table row), so a refused request costs no D1 rows.
  */
 async function prelude(request: Request, env: Env, route: Route): Promise<Prelude> {
   const groupId = decodeSegment(route.groupId ?? '');
   checkGroupId(groupId);
   await authenticate(groupId, request.headers.get('Authorization'));
+  const key = clientKey(request);
+  if (!(await allow(env.RATE_REQUESTS, 'RATE_REQUESTS', key))) throw rateLimited();
   const state = await store.groupState(env.DB, groupId);
   checkDrift(state.limits, env);
   if (state.blocked)
     throw new ApiError(410, 'group_blocked', 'this group is blocked on this server');
-  const key = clientKey(request);
-  if (!(await allow(env.RATE_REQUESTS, 'RATE_REQUESTS', key))) throw rateLimited();
   return { groupId, state, key };
 }
 
@@ -146,9 +147,10 @@ function checkDrift(limits: Limits, env: Env): void {
 // ---------- §6.1 info ----------
 
 async function info(request: Request, env: Env): Promise<Response> {
+  // Limit before reading the table, as in the prelude: a refused request costs no D1 rows.
+  if (!(await allow(env.RATE_REQUESTS, 'RATE_REQUESTS', clientKey(request)))) throw rateLimited();
   const limits = await store.loadLimits(env.DB);
   checkDrift(limits, env);
-  if (!(await allow(env.RATE_REQUESTS, 'RATE_REQUESTS', clientKey(request)))) throw rateLimited();
   return json(infoDocument(limits, env.EVEN_OPERATOR, env.EVEN_TERMS_URL));
 }
 

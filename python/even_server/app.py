@@ -69,15 +69,17 @@ def create_app(config: Config, *, store: Store | None = None, limiter: RateLimit
             raise rate_limited(wait)
 
     async def prelude(request: Request) -> tuple[str, GroupState, str]:
-        """design.md "Request handling": group id, token, blocklist, then rate limit."""
+        """design.md "Request handling": group id, token, rate limit, then
+        blocklist. The thresholds live in the limits table, so the local
+        database is read first; the order clients see is the Worker's."""
         group_id: str = request.path_params["groupId"]
         auth.check_group_id(group_id)
         auth.authenticate(group_id, request.headers.get("authorization"))
         state = await run_in_threadpool(store.group_state, group_id)
-        if state.blocked:
-            raise ApiError(410, "group_blocked", "this group is blocked on this server")
         key = client_key(request)
         enforce(key, (limiter.requests, state.limits.requests_per_minute))
+        if state.blocked:
+            raise ApiError(410, "group_blocked", "this group is blocked on this server")
         return group_id, state, key
 
     @app.get("/v1/info")
