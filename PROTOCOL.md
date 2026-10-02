@@ -114,11 +114,12 @@ missing fields, wrong types, or malformed encodings with `invalid_envelope`.
 of `c` plus 64. Servers use this definition so that published caps mean the
 same thing everywhere.
 
-When the server returns an envelope it adds one field:
+When the server returns an envelope it adds two fields:
 
 | Field | Type | Rule |
 |---|---|---|
 | `seq` | integer | Server-assigned, per group, strictly increasing from 1 within an epoch, never reused within an epoch. |
+| `received_at` | integer | When this server first stored the envelope in the current epoch, in Unix milliseconds (UTC). It is assigned once, together with `seq`, and never changed afterwards, including by a duplicate write. Every envelope stored by one request gets the same value, and it is greater than the value of every envelope stored by an earlier request to the group. |
 
 ## 5. Transport rules
 
@@ -217,12 +218,15 @@ Request body:
 Response `200`:
 
 ```json
-{ "accepted": 3, "duplicates": 1, "seq": 42, "epoch": "k3Jd…(22 chars)…" }
+{ "accepted": 3, "duplicates": 1, "seq": 42, "epoch": "k3Jd…(22 chars)…", "received_at": [ … ] }
 ```
 
 `seq` is the group's highest sequence after the write. `epoch` is the group's
-current epoch (§6.6). A `200` acknowledges **every** envelope in the request,
-accepted or duplicate: the client may treat all of them as stored.
+current epoch (§6.6). `received_at` holds one value per envelope in the
+request, in request order: the value stored for that id, which for a duplicate
+is the one assigned when it was first stored. A `200` acknowledges **every**
+envelope in the request, accepted or duplicate: the client may treat all of
+them as stored.
 
 ### 6.3 `GET /v1/groups/{groupId}/events?since={seq}&limit={n}` — read events
 
@@ -238,7 +242,7 @@ Response `200`:
 
 ```json
 {
-  "events": [ { "seq": 41, "id": "…", "v": 1, "n": "…", "c": "…" }, … ],
+  "events": [ { "seq": 41, "id": "…", "v": 1, "n": "…", "c": "…", "received_at": 1790985600000 }, … ],
   "next": 41,
   "more": false,
   "epoch": "k3Jd…"
@@ -377,8 +381,12 @@ client's concern.
 
 ## 9. Server obligations
 
-- **Ordering.** `seq` is the only ordering the server provides. It reflects
-  arrival, not creation. Clients never infer time from it.
+- **Ordering.** `seq` is the only ordering the server provides. `received_at`
+  is the server's clock, not an ordering; clients use it as an upper bound on
+  the time an event claims.
+- **Clock.** `received_at` comes from a clock kept within a minute of UTC. A
+  server whose clock is wrong by more than a day makes clients hold back every
+  write until the clock is corrected.
 - **Epochs.** Assigned on creation and recreation, returned on every response
   for the group, never reused.
 - **Retention.** A server MAY delete groups with no successful write for
@@ -405,6 +413,9 @@ client's concern.
 - Push the outbox before pulling, so a device's own events are never fetched
   back as "new" before they are acknowledged.
 - Store the cursor **and the epoch** per group per canonical server URL.
+- Store each envelope's `received_at` with its `seq`. Replace it with the value
+  in every push and pull response, and clear it whenever the cursor is reset
+  (an epoch change or a server change). Never send it to a server.
 - When no epoch is stored yet, adopt the first non-null epoch seen without
   resetting anything. When a response carries a non-null epoch that differs
   from the stored one, or `null` where one is stored: store the new value, set
@@ -450,7 +461,16 @@ this document, including atomic sequencing under concurrent writes, duplicate
 handling within and across requests, whole-batch rejection with `index`,
 precedence of 400 over 415, `more` and clamping semantics, epoch change after
 delete, cap enforcement with duplicates exempt, `410` for a blocked id,
-authentication before `501`, and the missing-group-is-empty rule.
+authentication before `501`, and the missing-group-is-empty rule. For
+`received_at` it asserts that every envelope on every pulled page carries one, a
+safe integer within 5 minutes of the runner's clock when the envelope was
+appended; that the push response holds one value per envelope in request order,
+a duplicate (within the request or stored earlier) reporting the stored value;
+that the values are stable across re-reads and duplicate re-pushes; that they
+are equal within one request and strictly increasing across requests in `seq`
+order, concurrent requests included; that after a delete and recreate every
+value is new and no earlier than the recreate time; and that push and pull
+report the same value for an id.
 
 Cap tests require small caps. The full suite MUST be run against an instance
 configured with `max_group_bytes ≤ 65536` and `max_group_events ≤ 200`; the

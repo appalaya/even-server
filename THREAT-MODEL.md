@@ -18,7 +18,7 @@ document changes first.
 
 | Actor | Capability |
 |---|---|
-| **Sync server operator** | Reads the database and logs, sees every request. Includes us running the free server, and any self-hoster. |
+| **Sync server operator** | Reads the database and logs, sees every request, and sets the arrival time members order edits by. Includes us running the free server, and any self-hoster. |
 | **Hosting platform** | Cloudflare terminates TLS for the public server and the landing page. It can see tokens, IPs, and URLs in flight, and keeps its own access logs under its own retention. |
 | **Landing page operator** | Serves the JavaScript that reads the invite fragment at `even.appalaya.com/i`. Same party as the public server operator. A trusted component. |
 | **Contact page bot check** | Cloudflare Turnstile, on `even.appalaya.com/contact`. Its script runs in the page with the page's own access, and its challenge frame sees the IP and browser details. A trusted component. The page adds the script only once no invite can be on it: a pasted invite is cleared from its field the moment it is read, and the field stays closed from then on. |
@@ -58,7 +58,12 @@ receive.
 Anything in asset classes 1 through 3. Not the amount, not the currency, not
 the group name, not a single member name, not which named member added which
 event. It cannot tell whether two events concern the same expense. It cannot
-read, forge, or relabel an event.
+read, forge, or relabel an event. It does choose the arrival time it reports
+for each event, and clients take that time as the latest an event can claim.
+With it, the operator can decide which of two existing writes to the same field
+wins, and show different members different winners. That is the power it
+already has by withholding events, and it is healed the same way, by moving the
+group. It cannot make a write count as later than its author stamped it.
 
 A server operator with full database and log access, and full knowledge of the
 protocol and source code, learns exactly the metadata in the previous section
@@ -78,6 +83,7 @@ review protect.
 | Token brute force | 256-bit token. Infeasible. |
 | Server fills with junk | Per-event, per-group (bytes and count), per-batch caps; per-IP request, write, and creation limits; a global daily write budget; idle-group expiry. See "Abuse posture." |
 | A member's device pushes malformed events to crash others | Every decrypted event is schema-validated on the client; invalid ones are skipped and counted, never fatal. Junk that fails authentication is bounded and purgeable. |
+| A member, or a phone with a wrong clock, stamps an event years ahead so it wins every later edit | Each event counts at the earlier of its stamp and the server's arrival time. An event stamped more than a day past the group's latest arrival is held back until real time catches up, on every server it is copied to. Arrival times come from the server, so no member can forge them, from any number of device ids. |
 | Invite leaks | Rotate: new secret, new keys, re-encrypted log under a new group, and a "closed" marker written into the old group so stragglers stop and ask for the new invite. The leaked invite continues to open the old, closed copy; it never sees anything written to the new group. When a straggler moves to the new group it carries over only events its own device wrote, so nothing the leak-holder wrote after the rotation can reach the new group. Closed groups are never self-healed, so once the old copy expires it stays gone. |
 | Mistyped invite code | Checksum in the invite; a corrupted code is rejected rather than silently joining an empty group. |
 | Server disappears | Every device holds the full log. Any member issues a new invite naming a new server; members who accept it move over and re-push. The group file export needs no server at all. |
@@ -99,6 +105,10 @@ review protect.
   IPs reveal that a group exists, roughly how active it is, from where, and
   which events likely share an author. Padding and mixing beyond 256-byte
   buckets are out of scope.
+- **A wrong server clock.** More than a day behind holds back every write; far
+  ahead lets far stamps through. Moving the group restores both.
+- **Arrival times are shared.** Every member sees when each event reached the
+  server, and so when each device was online.
 - **The hosting platform.** Cloudflare sees what the operator sees plus tokens
   in flight, and keeps its own logs. A user who does not accept this can
   self-host on a machine they control.
@@ -217,3 +227,6 @@ Any change to the server or the client's crypto module must re-answer:
 4. Is there a new way for one member to break another member's client?
 5. Did a limit become unenforced or unpublished?
 6. Did anything decrypted start touching disk?
+7. Does the client trust anything the server reports beyond the ciphertext
+   (`seq`, `epoch`, `received_at`)? What does a hostile server gain from it,
+   beyond what withholding already gives it?
