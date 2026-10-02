@@ -268,8 +268,8 @@ them at deploy or start.
 | `EVEN_RATE_REQUESTS_PER_MINUTE` | `120` | Per IP, all endpoints |
 | `EVEN_RATE_WRITES_PER_MINUTE` | `60` | Per IP, append. A whole group behind one NAT shares this, and everyone re-pushes at once after an epoch change, hence not lower |
 | `EVEN_RATE_GROUP_CREATES_PER_MINUTE` | `3` | Per IP, first write to a new group |
-| `EVEN_RATE_READS_PER_MINUTE` | `720` (public server: `25`) | Per IP, event reads (`GET …/events`) in units of 100 rows read: a poll with nothing new costs 1, a full page of 500 costs 6 (Read, above). The default, 120 full pages, changes nothing beyond the request limit; the public server sets it for D1's daily rows-read quota: 25 units is at most 3.6 million rows a day |
-| `EVEN_DAILY_WRITE_BUDGET` | `6500` | Append, global: events stored per UTC day, duplicates not counted |
+| `EVEN_RATE_READS_PER_MINUTE` | `720` (public server: `120`) | Per IP, event reads (`GET …/events`) in units of 100 rows read: a poll with nothing new costs 1, a full page of 500 costs 6 (Read, above). The default, 120 full pages, changes nothing beyond the request limit; the public server sets it for D1's rows-read allowance: 120 units is at most 17.3 million rows a day per address |
+| `EVEN_DAILY_WRITE_BUDGET` | `6500` (public server: `50000`) | Append, global: events stored per UTC day, duplicates not counted |
 | `EVEN_TRUST_PROXY_HEADER` | unset | Python: `CF-Connecting-IP` or `X-Forwarded-For` |
 | `EVEN_OPERATOR` | unset | `/v1/info` |
 | `EVEN_TERMS_URL` | unset | `/v1/info` |
