@@ -155,7 +155,8 @@ then expects `rate_limited` and a `Retry-After` header.
 | `src/validation.test.ts` | §4/§6.2 every malformed envelope, whole-batch rejection with `index`, 400 before 415, batch bounds. |
 | `src/auth.test.ts` | Malformed `groupId` → 400; missing, malformed or mismatched tokens → 401; no side effects. |
 | `src/caps.test.ts` | `413 group_full` at the exact byte and event boundaries; duplicates exempt; nothing stored. |
-| `src/concurrency.test.ts` | Atomic `seq` under 8 parallel appends; parallel retries stored once. |
+| `src/received-at.test.ts` | §4/§6.2 `received_at`: on every pulled envelope and near this machine's clock, one per envelope in the push response with duplicates reporting the stored value, stable, equal within a request and strictly increasing across requests, fresh after a delete, the same in push and pull. |
+| `src/concurrency.test.ts` | Atomic `seq` under 8 parallel appends, with one `received_at` per request, increasing in `seq` order; parallel retries stored once and reported alike. |
 | `src/delete.test.ts` | §6.4/§6.6 delete, idempotence, new epoch, `seq` restarting at 1. |
 | `src/subscriptions.test.ts` | §6.5: 401 before 501. |
 | `src/routes.test.ts` | 404, 405, and §5 headers on one response of each status. |
@@ -182,3 +183,6 @@ is wrong, change PROTOCOL.md first, then the test.
   auth.
 - **`/v1/info/` (with a trailing slash) is an unknown route**: `404`, not a redirect. The suite does not follow redirects.
 - **`retention_days` must be published** (§9), as a non-negative integer.
+- **`received_at` within 5 minutes of the machine running the suite.** §9 asks for a server clock within a minute of
+  UTC; the suite allows 5 minutes either way of its own clock at the append, so a test machine that is a little off
+  does not fail a correct server. Every other `received_at` check compares the server's values with each other.

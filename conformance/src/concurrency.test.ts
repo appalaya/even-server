@@ -1,10 +1,11 @@
 /**
  * PROTOCOL.md §6.2: seq assignment MUST be atomic per request. Concurrent requests never interleave their sequences
- * and never produce gaps or duplicates.
+ * and never produce gaps or duplicates. §4: `received_at` is assigned with `seq`, so it holds for concurrent requests
+ * too: one value per request, strictly increasing in seq order.
  */
 import { describe, expect, it } from 'vitest';
 import type { AppendOk, StoredEnvelope } from './client.ts';
-import { limits, oneTo, TestGroup, unsequenced } from './harness.ts';
+import { expectArrivalsPerRequest, limits, oneTo, TestGroup, unsequenced } from './harness.ts';
 import type { Envelope } from './keys.ts';
 
 const N = 8;
@@ -24,10 +25,11 @@ function expectAtomic(events: StoredEnvelope[], batches: Envelope[][], acks: App
     expect(acks[r]!.seq, `request ${r}: reported seq`).toBeGreaterThanOrEqual(first + batch.length - 1);
     expect(acks[r]!.seq, `request ${r}: reported seq`).toBeLessThanOrEqual(total);
   });
+  expectArrivalsPerRequest(events, batches, acks);
 }
 
 describe('§6.2 atomic sequencing under concurrent appends', () => {
-  it(`${N} parallel appends of 5 into a new group: seq 1..${N * 5}, each request contiguous, one epoch`, async () => {
+  it(`${N} parallel appends of 5 into a new group: seq 1..${N * 5}, each request contiguous with one received_at, one epoch`, async () => {
     const per = Math.min(5, limits().max_batch);
     const group = TestGroup.fresh();
     const batches = Array.from({ length: N }, () => group.envelopes(per));
@@ -44,14 +46,15 @@ describe('§6.2 atomic sequencing under concurrent appends', () => {
     const per = Math.min(5, limits().max_batch);
     const group = TestGroup.fresh();
     const seed = group.envelope();
-    const { epoch } = await group.appendOk([seed]);
+    const seeded = await group.appendOk([seed]);
+    const { epoch } = seeded;
     const batches = Array.from({ length: N }, () => group.envelopes(per));
     const acks = await Promise.all(batches.map((batch) => group.appendOk(batch)));
     for (const ack of acks) expect(ack).toMatchObject({ accepted: per, duplicates: 0, epoch });
 
     const all = await group.readAll();
     expect(all.events[0]).toMatchObject({ ...seed, seq: 1 });
-    expectAtomic(all.events, [[seed], ...batches], [{ accepted: 1, duplicates: 0, seq: 1, epoch }, ...acks], 1 + N * per);
+    expectAtomic(all.events, [[seed], ...batches], [seeded, ...acks], 1 + N * per);
   });
 
   it('parallel retries of one batch store it once: accepted sums to the batch size, the rest are duplicates', async () => {
@@ -64,5 +67,9 @@ describe('§6.2 atomic sequencing under concurrent appends', () => {
     const all = await group.readAll();
     expect(all.events.map(unsequenced)).toEqual(batch);
     expect(all.events.map((e) => e.seq)).toEqual(oneTo(per));
+    // One request stored the batch; every retry reports the values it stored, never one of its own (§6.2).
+    const stored = all.events.map((e) => e.received_at);
+    expect(new Set(stored).size, 'one request stored the batch, so one received_at').toBe(1);
+    for (const ack of acks) expect(ack.received_at).toEqual(stored);
   });
 });
