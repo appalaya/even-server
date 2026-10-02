@@ -55,7 +55,10 @@
     "EVEN_RATE_REQUESTS_PER_MINUTE": "120",
     "EVEN_RATE_WRITES_PER_MINUTE": "60",
     "EVEN_RATE_GROUP_CREATES_PER_MINUTE": "3",
-    "EVEN_DAILY_WRITE_BUDGET": "0",
+    // Append requests per UTC day, all groups (design.md default 0 = none; the public server sets one). One append
+    // writes at most 104 D1 rows, so 500 a day is at most 52,000 of the Free plan's 100,000 rows written a day
+    // (README.md, "The daily write budget").
+    "EVEN_DAILY_WRITE_BUDGET": "500",
     // Optional strings shown to users in /v1/info; empty means unset.
     "EVEN_OPERATOR": "",
     "EVEN_TERMS_URL": ""
