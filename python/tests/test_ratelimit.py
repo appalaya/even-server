@@ -3,8 +3,12 @@ import logging
 import pytest
 from fastapi.testclient import TestClient
 
-from even_server.ratelimit import RateLimiter, client_address, ip_key
+from even_server.db import read_rows
+from even_server.ratelimit import RateLimiter, SlidingWindow, client_address, ip_key, read_units
 from support import batch, envelope, new_group
+
+# A group of 600 events and pages of up to 500, as on the public server.
+BIG_GROUPS = {"EVEN_MAX_GROUP_EVENTS": 10_000, "EVEN_MAX_GROUP_BYTES": 100_000_000, "EVEN_MAX_PAGE": 500}
 
 
 class FakeClock:
@@ -74,6 +78,94 @@ def test_reads_per_minute_count_event_reads_only(make_client):
     assert client.delete(group.path, headers=group.headers).status_code == 204
     clock.now += 60
     assert client.get(group.events, headers=group.headers).status_code == 200
+
+
+def fill(client, group, count):
+    for start in range(0, count, 25):
+        envelopes = [envelope(size=17) for _ in range(min(25, count - start))]
+        assert client.post(group.events, json=batch(*envelopes), headers=group.headers).status_code == 200
+
+
+def test_read_rows_counts_rows_as_the_worker_does(make_client):
+    """The same counts the Worker's test pins against D1's meta.rows_read: 12
+    rows of prelude (11 limits rows and the group row), 1 for the epoch, then
+    the events after `since` up to `limit`, plus one."""
+    client = make_client(**BIG_GROUPS)
+    group = new_group()
+    fill(client, group, 600)
+    store = client.app.state.store
+    state = store.group_state(group.id)
+    assert (state.events, state.rows_read) == (600, 12)
+    cases = [(600, 500, 14), (0, 500, 514), (0, 86, 100), (0, 87, 101), (5_000, 500, 14), (590, 500, 24)]
+    assert [read_rows(state, since, limit) for since, limit, _ in cases] == [rows for _, _, rows in cases]
+    assert read_rows(store.group_state(new_group().id), 0, 500) == 12  # no group: 11 + the probe
+    assert [read_units(rows) for rows in (0, 14, 100, 101, 514, 601)] == [1, 1, 1, 2, 6, 7]
+
+
+def test_a_read_costs_a_unit_per_started_100_rows(make_client):
+    """A quiet poll (14 rows) costs 1 of the 25 units, a full page (514) 6."""
+    clock = FakeClock()
+    client = make_client(EVEN_RATE_READS_PER_MINUTE=25, limiter=RateLimiter(clock), **BIG_GROUPS)
+    group = new_group()
+    fill(client, group, 600)
+    quiet = {"since": 600}
+    for _ in range(4):
+        page = client.get(group.events, headers=group.headers)
+        assert page.status_code == 200 and len(page.json()["events"]) == 500 and page.json()["more"]
+    # 24 units spent: one quiet poll still fits, then nothing does.
+    assert client.get(group.events, params=quiet, headers=group.headers).status_code == 200
+    refused = client.get(group.events, params=quiet, headers=group.headers)
+    assert refused.status_code == 429 and refused.json()["error"] == "rate_limited"
+    assert refused.headers["retry-after"] == "60"
+    clock.now += 60
+    for _ in range(25):
+        assert client.get(group.events, params=quiet, headers=group.headers).status_code == 200
+    assert client.get(group.events, params=quiet, headers=group.headers).status_code == 429
+
+
+def test_a_read_past_the_allowance_is_refused_before_its_page_is_read(make_client):
+    clock = FakeClock()
+    client = make_client(EVEN_RATE_READS_PER_MINUTE=25, limiter=RateLimiter(clock), **BIG_GROUPS)
+    group = new_group()
+    fill(client, group, 600)
+    for _ in range(4):
+        assert client.get(group.events, headers=group.headers).status_code == 200
+    store = client.app.state.store
+    pages = []
+    read = store.read
+    store.read = lambda *args: pages.append(args) or read(*args)
+    clock.now += 30
+    # A fifth full page: its first unit fits (the 25th), the other five do not.
+    refused = client.get(group.events, headers=group.headers)
+    assert refused.status_code == 429 and refused.json()["error"] == "rate_limited"
+    assert refused.headers["retry-after"] == "30"  # when the four pages' units leave the window
+    assert pages == []
+    assert client.get(group.events, params={"since": 600}, headers=group.headers).status_code == 429
+    clock.now += 30
+    assert client.get(group.events, headers=group.headers).status_code == 200
+    assert len(pages) == 1
+
+
+def test_a_read_never_costs_more_than_the_whole_allowance(make_client):
+    """So a full page fits in a fresh minute even when max_page outgrows the allowance."""
+    clock = FakeClock()
+    client = make_client(EVEN_RATE_READS_PER_MINUTE=3, limiter=RateLimiter(clock), **BIG_GROUPS)
+    group = new_group()
+    fill(client, group, 600)
+    page = client.get(group.events, headers=group.headers)
+    assert page.status_code == 200 and len(page.json()["events"]) == 500
+    assert client.get(group.events, params={"since": 600}, headers=group.headers).status_code == 429
+
+
+def test_sliding_window_counts_a_cost_all_or_nothing():
+    window = SlidingWindow()
+    window.record("k", 0.0, cost=3)
+    window.record("k", 10.0)
+    assert window.retry_after("k", 5, 20.0) == 0
+    assert window.retry_after("k", 5, 20.0, cost=2) == 40  # one of the three from t=0 must leave
+    assert window.retry_after("k", 5, 20.0, cost=5) == 50  # all four must leave, the last at t=70
+    assert window.retry_after("k", 5, 20.0, cost=6) == 60  # more than the limit: a whole window
+    assert window.retry_after("other", 5, 20.0, cost=5) == 0
 
 
 def test_writes_per_minute(make_client):

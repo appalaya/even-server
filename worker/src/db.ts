@@ -10,6 +10,10 @@ export interface GroupState {
   limits: Limits;
   blocked: boolean;
   exists: boolean;
+  /** The group's event count (0 without a row). Within an epoch `seq` runs 1..events: see readRows. */
+  events: number;
+  /** D1's `meta.rows_read` for the prelude's batch: part of what an event read is charged (README.md). */
+  rowsRead: number;
 }
 
 export interface AppendResult {
@@ -32,6 +36,8 @@ export interface Page {
   events: StoredEvent[];
   more: boolean;
   epoch: string | null;
+  /** D1's `meta.rows_read` for the page's batch; readRows predicts it (a test pins the two together). */
+  rowsRead: number;
 }
 
 /** The cap trigger aborted the batch (RAISE(ABORT, 'group_full')); nothing was written. */
@@ -79,18 +85,40 @@ export async function loadLimits(db: D1Database): Promise<Limits> {
   return limitsFromRows(results);
 }
 
-/** Everything the request prelude needs, in one round trip: limits, blocklist, and existence. */
+/** Everything the request prelude needs, in one round trip: limits, blocklist, existence and event count. */
 export async function groupState(db: D1Database, groupId: string): Promise<GroupState> {
-  const [limits, blocked, group] = await db.batch<Record<string, unknown>>([
+  const results = await db.batch<Record<string, unknown>>([
     db.prepare(SELECT_LIMITS),
     db.prepare('SELECT 1 AS hit FROM blocked WHERE group_id = ?').bind(groupId),
-    db.prepare('SELECT 1 AS hit FROM groups WHERE id = ?').bind(groupId),
+    db.prepare('SELECT events FROM groups WHERE id = ?').bind(groupId),
   ]);
+  const [limits, blocked, group] = results;
+  const events = group?.results[0]?.events;
   return {
     limits: limitsFromRows((limits?.results ?? []) as Array<{ key: unknown; value: unknown }>),
     blocked: (blocked?.results.length ?? 0) > 0,
     exists: (group?.results.length ?? 0) > 0,
+    events: typeof events === 'number' ? events : 0,
+    rowsRead: rowsRead(results),
   };
+}
+
+function rowsRead(results: ReadonlyArray<D1Result<unknown>>): number {
+  return results.reduce((sum, result) => sum + (result.meta.rows_read ?? 0), 0);
+}
+
+/**
+ * The D1 rows an event read costs in all, as `meta.rows_read` counts them, known before its events are read
+ * (README.md, "Event reads per address"): the prelude's rows, the group row for the epoch, and the events after
+ * `since` up to `limit`, plus one: the look-ahead row that sets `more`, or else the index entry where the scan stops
+ * (which D1 counts even when no event follows `since`). The one exception is a group whose events are the last in
+ * the index, where a scan that runs out reads one row fewer, so this never counts too few. Within an epoch `seq` runs
+ * 1..events with no gaps, because events are only ever deleted together with their group, so `events − since` of
+ * them follow `since`. Events appended between the prelude and the read are read but not counted here.
+ */
+export function readRows(state: GroupState, since: number, limit: number): number {
+  const following = Math.max(0, state.events - since);
+  return state.rowsRead + (state.exists ? 1 : 0) + Math.min(following, limit) + 1;
 }
 
 /**
@@ -194,7 +222,7 @@ export async function read(
   since: number,
   limit: number,
 ): Promise<Page> {
-  const [group, events] = await db.batch<Record<string, unknown>>([
+  const results = await db.batch<Record<string, unknown>>([
     db.prepare('SELECT epoch FROM groups WHERE id = ?').bind(groupId),
     db
       .prepare(
@@ -202,13 +230,16 @@ export async function read(
       )
       .bind(groupId, since, limit + 1),
   ]);
+  const [group, events] = results;
   const epoch = group?.results[0]?.epoch;
-  if (typeof epoch !== 'string') return { events: [], more: false, epoch: null };
+  if (typeof epoch !== 'string')
+    return { events: [], more: false, epoch: null, rowsRead: rowsRead(results) };
   const rows = (events?.results ?? []) as unknown as StoredEvent[];
   return {
     events: rows.slice(0, limit).map(({ seq, id, v, n, c }) => ({ seq, id, v, n, c })),
     more: rows.length > limit,
     epoch,
+    rowsRead: rowsRead(results),
   };
 }
 

@@ -125,6 +125,39 @@ export async function read(group: Group, query = '', options: CallOptions = {}):
   });
 }
 
+/**
+ * Appends `count` small events to `group` in full batches. The caller raises max_group_events and max_group_bytes
+ * past the test limits first (withLimits).
+ */
+export async function fill(group: Group, count: number): Promise<void> {
+  for (let stored = 0; stored < count; stored += 25) {
+    const batch = Array.from({ length: Math.min(25, count - stored) }, () =>
+      envelope({ cipherBytes: 17 }),
+    );
+    const response = await append(group, batch);
+    if (response.status !== 200) throw new Error(`fill: ${response.status} ${await response.text()}`);
+  }
+}
+
+/**
+ * A fake binding with an allowance, as the platform's behaves within one window: the first `allowance` calls per key
+ * succeed and later ones fail, and a refused call counts nothing. Records every key.
+ */
+export function allowanceLimiter(allowance: number): RateLimit & { keys: string[] } {
+  const keys: string[] = [];
+  const used = new Map<string, number>();
+  return {
+    keys,
+    async limit({ key }) {
+      keys.push(key);
+      const count = used.get(key) ?? 0;
+      if (count >= allowance) return { success: false };
+      used.set(key, count + 1);
+      return { success: true };
+    },
+  };
+}
+
 /** A fake Workers Rate Limiting binding that records keys and answers `success` (or a function of the key). */
 export function fakeLimiter(
   success: boolean | ((key: string) => boolean) = true,

@@ -9,11 +9,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as store from '../src/db';
 import { parseAppendBody } from '../src/envelope';
 import worker, { expireIdleGroups } from '../src/index';
+import { readUnits } from '../src/ratelimit';
 import {
+  allowanceLimiter,
   append,
   call,
   envelope,
   fakeLimiter,
+  fill,
   freshGroup,
   read,
   seedLimits,
@@ -506,6 +509,79 @@ describe('rate limiting', () => {
     expect((await call('GET', '/v1/info', noReads)).status).toBe(200);
   });
 
+  // A group of 600 events and pages of up to 500, as on the public server.
+  const bigGroup = { max_group_events: 10_000, max_group_bytes: 100_000_000, max_page: 500 };
+
+  it('an event read is charged one unit per started 100 D1 rows: a quiet poll 1, a full page 6', async () => {
+    await withLimits({ ...bigGroup, reads_per_minute: 25 }, async () => {
+      const group = await freshGroup();
+      await fill(group, 600);
+      const reads = fakeLimiter();
+      const units = async (target: Group, query: string): Promise<number> => {
+        const before = reads.keys.length;
+        expect((await read(target, query, { env: { RATE_READS: reads } })).status).toBe(200);
+        return reads.keys.length - before;
+      };
+      expect(await units(group, '?since=600')).toBe(1); // nothing new: 14 rows
+      expect(await units(group, '?since=0')).toBe(6); // 500 events and more to come: 514 rows
+      expect(await units(group, '?since=0&limit=86')).toBe(1); // 86 + the look-ahead row: 100 rows
+      expect(await units(group, '?since=0&limit=87')).toBe(2); // 101 rows
+      expect(await units(group, '?since=590')).toBe(1); // the last 10: 24 rows
+      expect(await units(await freshGroup(), '')).toBe(1); // no group: 12 rows
+    });
+  });
+
+  it('past the allowance a read is refused with 429 and Retry-After before its page is read, and the address stays refused', async () => {
+    await withLimits({ ...bigGroup, reads_per_minute: 25 }, async () => {
+      const group = await freshGroup();
+      await fill(group, 600);
+      const reads = allowanceLimiter(25);
+      const batches: number[] = [];
+      const db = {
+        prepare: (query: string) => env.DB.prepare(query),
+        batch: (statements: D1PreparedStatement[]) => {
+          batches.push(statements.length);
+          return env.DB.batch(statements);
+        },
+      } as unknown as D1Database;
+      const bindings = { env: { DB: db, RATE_READS: reads } };
+      for (let page = 0; page < 4; page++)
+        expect((await read(group, '?since=0', bindings)).status).toBe(200);
+      expect(reads.keys).toHaveLength(24);
+
+      // A fifth full page: its first unit is the 25th, the next is refused, and the events are never read.
+      batches.length = 0;
+      const refused = await read(group, '?since=0', bindings);
+      expect(refused.status).toBe(429);
+      expect(refused.headers.get('Retry-After')).toBe('60');
+      expect(await body(refused)).toMatchObject({ error: 'rate_limited' });
+      expect(batches).toEqual([3]); // the prelude's batch only, not the page's
+      expect(requestLines().at(-1)).toMatchObject({ status: 429, limited: true });
+
+      // Out of units: even a quiet poll is refused, before any D1 read.
+      batches.length = 0;
+      expect((await read(group, '?since=600', bindings)).status).toBe(429);
+      expect(batches).toEqual([]);
+
+      // Another address has an allowance of its own.
+      const elsewhere = { ...bindings, headers: { 'CF-Connecting-IP': '198.51.100.20' } };
+      expect((await read(group, '?since=600', elsewhere)).status).toBe(200);
+    });
+  });
+
+  it('a read is never charged more than the whole allowance, so a full page fits in a fresh minute', async () => {
+    await withLimits({ ...bigGroup, reads_per_minute: 3 }, async () => {
+      const group = await freshGroup();
+      await fill(group, 600);
+      const reads = allowanceLimiter(3);
+      const page = await read(group, '?since=0', { env: { RATE_READS: reads } });
+      expect(page.status).toBe(200);
+      expect((await body<{ events: unknown[] }>(page)).events).toHaveLength(500);
+      expect(reads.keys).toHaveLength(3);
+      expect((await read(group, '?since=600', { env: { RATE_READS: reads } })).status).toBe(429);
+    });
+  });
+
   it('keys by CF-Connecting-IP, IPv6 by /64', async () => {
     const limiter = fakeLimiter();
     await call('GET', '/v1/info', {
@@ -797,6 +873,41 @@ describe('scheduled expiry', () => {
     expect(pick.results).toHaveLength(1);
     expect(pick.meta.rows_read).toBeLessThan(5);
     expect(await expireIdleGroups(env, now)).toMatchObject({ groups: 1, complete: true });
+  });
+});
+
+describe('D1 rows read by an event read (the read allowance is counted in these; README.md)', () => {
+  it('readRows predicts meta.rows_read before the page is read: 14 for a quiet poll, 514 for a full page, never too few', async () => {
+    await withLimits(
+      { max_group_events: 10_000, max_group_bytes: 100_000_000, max_page: 500 },
+      async () => {
+        const group = await freshGroup();
+        await fill(group, 600);
+        const missing = await freshGroup();
+        // group, since, limit, rows: 12 in the prelude, 1 for the epoch, then the events and one more row. Where the
+        // scan runs out of the group's events, the extra row is the next group's first index entry, which a group
+        // last in the index does not have; there D1 counts one fewer, never more.
+        const cases: Array<[Group, number, number, number, 'exact' | 'at most']> = [
+          [group, 600, 500, 14, 'exact'], // nothing new: the probe that finds nothing reads 1
+          [group, 0, 500, 514, 'exact'], // 500 events and the look-ahead row
+          [group, 0, 86, 100, 'exact'],
+          [group, 0, 87, 101, 'exact'],
+          [group, 5_000, 500, 14, 'exact'], // a cursor past the log (an older epoch's)
+          [missing, 0, 500, 12, 'exact'], // no row: 11 limits rows, no epoch, the probe
+          [group, 100, 500, 514, 'at most'], // exactly 500 left: the scan runs out
+          [group, 590, 500, 24, 'at most'], // the last 10
+        ];
+        for (const [target, since, limit, rows, how] of cases) {
+          const state = await store.groupState(env.DB, target.groupId);
+          const page = await store.read(env.DB, target.groupId, since, limit);
+          const measured = state.rowsRead + page.rowsRead;
+          expect(store.readRows(state, since, limit), `predicted, since ${since} limit ${limit}`).toBe(rows);
+          if (how === 'exact') expect(measured, `measured, since ${since} limit ${limit}`).toBe(rows);
+          else expect([rows - 1, rows], `measured, since ${since} limit ${limit}`).toContain(measured);
+        }
+        expect([14, 514, 100, 101, 12].map(readUnits)).toEqual([1, 6, 1, 2, 1]);
+      },
+    );
   });
 });
 

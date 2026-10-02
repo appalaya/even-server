@@ -5,7 +5,10 @@ export interface Env {
   RATE_REQUESTS?: RateLimit;
   RATE_WRITES?: RateLimit;
   RATE_CREATES?: RateLimit;
-  /** Event reads (GET …/events), for D1's daily rows-read quota (README.md, "Event reads per address"). */
+  /**
+   * Event reads (GET …/events), one call per unit of 100 D1 rows read, for D1's daily rows-read quota (README.md,
+   * "Event reads per address").
+   */
   RATE_READS?: RateLimit;
   /** Optional strings for /v1/info; empty means unset. */
   EVEN_OPERATOR?: string;

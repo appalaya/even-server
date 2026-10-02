@@ -12,7 +12,7 @@ def test_defaults_match_the_design_table():
     assert config.limits == Limits(
         max_event_bytes=8192, max_group_bytes=2097152, max_group_events=10000, max_batch=25, max_page=500,
         daily_write_budget=6500, requests_per_minute=120, writes_per_minute=60, group_creates_per_minute=3,
-        reads_per_minute=120, retention_days=365,
+        reads_per_minute=720, retention_days=365,
     )
     assert (config.db_path, config.host, config.port) == ("./even.db", "127.0.0.1", 8787)
     assert (config.trust_proxy_header, config.operator, config.terms_url) == (None, None, None)

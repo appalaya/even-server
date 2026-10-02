@@ -39,9 +39,8 @@ npm run dev                             # http://127.0.0.1:8787 with the product
 `npm run typecheck` checks `src/` and `test/` (TypeScript strict). `npm test` runs the Worker's own tests inside
 workerd through `@cloudflare/vitest-pool-workers`, against an in-memory D1 with `schema.sql` applied: the round trip,
 the triggers (including fail-closed when a cap row is missing), the daily budget (events stored, not appends; exact
-under concurrent appends),
-the blocklist, the rate-limit paths
-(with fake bindings), the log lines, and expiry. The conformance suite remains the definition of correctness.
+under concurrent appends), the blocklist, the rate-limit paths (with fake bindings), the rows an event read is
+charged for, the log lines, and expiry. The conformance suite remains the definition of correctness.
 
 ### Smoke test
 
@@ -71,7 +70,7 @@ curl -s -w ' %{http_code}\n' -H "Authorization: Bearer $(node -p 'require("node:
 Output from a real run:
 
 ```
-{"protocol":[1],"limits":{"max_event_bytes":8192,"max_group_bytes":65536,"max_group_events":200,"max_batch":25,"max_page":50,"daily_write_budget":0,"rate":{"requests_per_minute":100000,"writes_per_minute":100000,"group_creates_per_minute":100000}},"retention_days":365,"push":false}
+{"protocol":[1],"limits":{"max_event_bytes":8192,"max_group_bytes":65536,"max_group_events":200,"max_batch":25,"max_page":50,"daily_write_budget":0,"rate":{"requests_per_minute":100000,"writes_per_minute":100000,"group_creates_per_minute":100000,"reads_per_minute":100000}},"retention_days":365,"push":false}
 {"accepted":1,"duplicates":0,"seq":1,"epoch":"VNQqhBoRLlq7Dvd7odF8Jw"}
 {"events":[{"seq":1,"id":"waxVrr-3SxjKe56OgC-TKA","v":1,"n":"7gzelImjbsGCEbu9c52NESKRTlvt_YG6","c":"a5QIlENnOWfg…"}],"next":1,"more":false,"epoch":"VNQqhBoRLlq7Dvd7odF8Jw"}
 204
@@ -132,7 +131,7 @@ Every limit is a var in `wrangler.jsonc`, with the same names and defaults as th
 | `EVEN_RATE_REQUESTS_PER_MINUTE` | `120` | `RATE_REQUESTS` binding, every request to a documented route |
 | `EVEN_RATE_WRITES_PER_MINUTE` | `60` | `RATE_WRITES` binding, appends |
 | `EVEN_RATE_GROUP_CREATES_PER_MINUTE` | `3` | `RATE_CREATES` binding, appends to a group with no row yet |
-| `EVEN_RATE_READS_PER_MINUTE` | `120`; **`5`** in `wrangler.jsonc`, the public server ([why](#event-reads-per-address)) | `RATE_READS` binding, event reads (`GET …/events`) |
+| `EVEN_RATE_READS_PER_MINUTE` | `720`; **`25`** in `wrangler.jsonc`, the public server ([why](#event-reads-per-address)) | `RATE_READS` binding, event reads (`GET …/events`) in units of 100 D1 rows read |
 | `EVEN_DAILY_WRITE_BUDGET` | `6500` ([why](#the-daily-write-budget)); `0` turns it off | `counters_budget` triggers, events stored per UTC day (duplicates not counted), all groups |
 | `EVEN_OPERATOR` | empty | `/v1/info` `operator` |
 | `EVEN_TERMS_URL` | empty | `/v1/info` `terms` |
@@ -299,29 +298,58 @@ case.
 
 ### Event reads per address
 
-D1's free 5 million rows read a day are the other quota one client could spend. Measured as `meta.rows_read` on
-local D1, a full page (`max_page` 500) reads 514 rows: 12 in the request prelude (the 11 rows of the `limits` table
-and the group row), 1 for the group's epoch, and `limit + 1` = 501 events. At the 120 requests a minute every route
-allows, one address reading full pages would spend the day's reads in 81 minutes, after which D1 refuses every
-query until 00:00 UTC.
+D1's free 5 million rows read a day are the other quota one client could spend. What an event read reads, measured as
+`meta.rows_read` on local D1 (and pinned by a test in `test/worker.test.ts`):
 
-So `GET /v1/groups/{groupId}/events` has its own per-IP limit, **5 a minute** on the public server
-(`EVEN_RATE_READS_PER_MINUTE` and the `RATE_READS` binding; `/v1/info` publishes it as
-`limits.rate.reads_per_minute`), checked with the request limiter before any D1 read. A whole day of full pages at
-that limit reads 5 × 1,440 × 514 = **3,700,800 rows, 74%** of the quota. What it means for a client: a sync reads
-each group once when nothing is new, so five groups sync in a minute from one address and a sixth waits out
-`Retry-After: 60`; a download reads 500 events a page, 2,500 a minute, so a group at the 10,000-event cap takes
-4 minutes. A household or office behind one NAT shares the five.
+| Part of `GET /v1/groups/{groupId}/events` | Rows read |
+|---|---:|
+| the prelude: the 11 rows of the `limits` table, and the group row (0 for a group with no row) | 12 |
+| the group's epoch (0 without a row) | 1 |
+| the events after `since`, up to `limit` | 0 to `limit` |
+| one more: the look-ahead row that sets `more`, or the index entry where the scan stops | 1 |
 
-To allow more reads a minute for the same worst case, lower `EVEN_MAX_PAGE` with it: at 100, a full page reads
-114 rows, and 20 reads a minute come to 3,283,200 rows a day.
+A poll of a group with nothing new reads 14 rows; a full page (`max_page` 500, more to come) reads 12 + 1 + 500 + 1 =
+514. At the 120 requests a minute every route allows, one address reading full pages would spend the day's reads in 81
+minutes, after which D1 refuses every query until 00:00 UTC.
+
+So event reads have their own allowance per address, counted in **units of 100 rows**: a read costs ceil(rows / 100)
+units, at least 1, so a read of E events costs ceil((14 + E) / 100): a quiet poll or a read of up to 86 events costs
+1, and a full page costs 6. The public server allows **25 units a minute** (`EVEN_RATE_READS_PER_MINUTE` and the `RATE_READS`
+binding; `/v1/info` publishes it as `limits.rate.reads_per_minute`). Every unit pays for at most 100 rows, so a whole
+day at the allowance reads at most 25 × 100 × 1,440 = **3,600,000 rows, 72%** of the quota, whatever size the reads
+are. The published name stays: a read of up to 100 rows is one read, and only larger ones count more. The default
+for a self-hosted Worker is 720, 120 full pages a minute, which adds nothing to the request limit.
+
+How a read is charged. The binding has no weight, so each unit is one `limit({ key })` call, and a unit once taken
+cannot be given back. The first unit is taken with the request limiter, before any D1 read, so an address with
+nothing left costs no rows at all. The rest are taken after the prelude and before the events are read: the group
+row the prelude reads holds the group's event count, and `seq` runs 1..count within an epoch (events are deleted
+only together with their group), so how many events follow `since`, and so the cost, is known before the page is
+read (`readRows` in `src/db.ts`; it counts the extra row even where D1 does not, so it never counts too few). If
+the allowance runs out partway, the read is refused with `429` and `Retry-After: 60` and reads nothing more, and the
+units it did take stay spent, which uses up the address's minute: a refused client reads no further page until the
+minute is over, however many reads it has in flight. The rows of a refused read (its prelude, 12) are paid by its
+first unit. Two small exceptions: events appended between the prelude and the read are read without being counted
+(at most what is appended in those milliseconds; the daily write budget caps all appends at 6,500 events a day), and
+a read is never charged more than the whole allowance, so that a full page always fits in a fresh minute even if
+`EVEN_MAX_PAGE` is raised past what `EVEN_RATE_READS_PER_MINUTE` covers. Size the two together: a full page costs
+ceil((`max_page` + 14) / 100) units.
+
+What it means for a client: 25 quiet polls a minute per address. A phone that syncs six groups when it opens uses 6,
+so four phones behind one address (a household, an office, a mobile carrier's NAT) can open the app in the same
+minute before the fifth waits out a `429`; on a carrier that gives phones IPv6, each phone has its own /64 and its
+own 25. A download reads 4 full pages a minute (24 units), 2,000 events, so a group at the 10,000-event cap takes 5
+minutes. A `429` is transient: clients wait `Retry-After` and carry on (PROTOCOL.md §10).
+
+The worst case depends on the allowance alone: N units a minute is at most N × 144,000 rows a day. 34 is the most
+that stays under 5 million (4,896,000), with nothing left for other requests.
 
 What the read limit does not cover, so that per-IP limits alone still cannot hold one determined client under the
 quota:
 
 - Every other request reads too: 12 rows in a group route's prelude, 11 for `/v1/info`. At 120 a minute that is up
-  to 2,073,600 rows a day from one address without reading a single event, and about 5.7 million together with full
-  pages at the read limit.
+  to 2,073,600 rows a day from one address without reading a single event, and about 5.6 million together with
+  reads at the allowance (five reads of 500 rows, then 115 other requests a minute).
 - An append of 25 duplicates stores nothing and is not counted by the budget, but reads about 140 rows with its
   prelude; at `EVEN_RATE_WRITES_PER_MINUTE` (60 a minute) that is about 12 million rows a day.
 - Many addresses: every limit here is per address.
@@ -382,12 +410,14 @@ the log shows `{"level":"info","event":"expiry","groups_deleted":…,"rows_writt
 ## Rate limits and the daily budget
 
 - Four Workers Rate Limiting bindings with 60-second periods, keyed by `CF-Connecting-IP` (IPv6 by /64): every
-  request, appends, group creations, and event reads ([why](#event-reads-per-address)). A `429` carries
-  `Retry-After: 60`, the binding's period, since the binding does not report when its window ends. The platform's
-  limits are approximate and per Cloudflare location, which is fine for abuse control.
-- The order is: authentication, the request limiter (and for an event read the read limiter), then D1 (`/v1/info`:
-  the limiter, then the `limits` table). An unauthenticated flood consumes no limiter for a real group, and a
-  refused request costs no D1 rows: the thresholds are binding configuration, so nothing is read to apply them. A
+  request, appends, group creations, and event reads, which count one call per unit of 100 rows
+  ([why](#event-reads-per-address)). A `429` carries `Retry-After: 60`, the binding's period, since the binding
+  does not report when its window ends. The platform's limits are approximate and per Cloudflare location, which is
+  fine for abuse control.
+- The order is: authentication, the request limiter (and for an event read the first unit of the read limiter),
+  then D1 (`/v1/info`: the limiter, then the `limits` table). An unauthenticated flood consumes no limiter for a
+  real group, and a refused request costs no D1 rows: the thresholds are binding configuration, so nothing is read
+  to apply them. An event read takes the rest of its units after the prelude, before its events are read. A
   blocked group's requests count like any other, so past the limit they get `429` rather than `410`.
 - The creation limiter is consulted only when the group had no row at the start of the request; the write limiter
   only on appends.

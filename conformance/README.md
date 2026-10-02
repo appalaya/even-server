@@ -47,7 +47,7 @@ Use these values for test runs. Both reference servers read the same names:
 | `EVEN_RATE_REQUESTS_PER_MINUTE` | `100000` | the suite makes a few hundred requests in seconds |
 | `EVEN_RATE_WRITES_PER_MINUTE` | `100000` | |
 | `EVEN_RATE_GROUP_CREATES_PER_MINUTE` | `100000` | one new group per test |
-| `EVEN_RATE_READS_PER_MINUTE` | `100000` | most tests read their group back, some page through it |
+| `EVEN_RATE_READS_PER_MINUTE` | `100000` | most tests read their group back, some page through it; a server may count a large read as several (§6.1) |
 | `EVEN_DAILY_WRITE_BUDGET` | `0` | a budget can run out mid-run (`503 over_budget`) |
 
 Leave `EVEN_MAX_EVENT_BYTES` and `EVEN_MAX_BATCH` at their defaults or change them. The suite reads `max_event_bytes`,
