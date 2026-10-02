@@ -40,7 +40,7 @@
     { "name": "RATE_REQUESTS", "namespace_id": "4101", "simple": { "limit": 120, "period": 60 } },
     { "name": "RATE_WRITES", "namespace_id": "4102", "simple": { "limit": 60, "period": 60 } },
     { "name": "RATE_CREATES", "namespace_id": "4103", "simple": { "limit": 3, "period": 60 } },
-    { "name": "RATE_READS", "namespace_id": "4104", "simple": { "limit": 25, "period": 60 } }
+    { "name": "RATE_READS", "namespace_id": "4104", "simple": { "limit": 120, "period": 60 } }
   ],
 
   // Idle-group expiry (design.md, "Expiry"), once a day.
@@ -60,11 +60,11 @@
     // 720; the public server sets 25). A quiet poll reads 14 rows and costs 1 unit, a full page of 500 reads 514 and
     // costs 6, so a day at 25 units a minute reads at most 25 × 100 × 1,440 = 3,600,000 of the Free plan's 5 million
     // rows read a day, whatever the reads (README.md, "Event reads per address").
-    "EVEN_RATE_READS_PER_MINUTE": "25",
+    "EVEN_RATE_READS_PER_MINUTE": "120",
     // Events stored per UTC day, all groups, duplicates not counted (the design.md default; 0 turns it off). One
     // stored event writes at most 8 D1 rows (a one-event append to a new group), so 6,500 a day is at
     // most 52,001 of the Free plan's 100,000 rows written a day (README.md, "The daily write budget").
-    "EVEN_DAILY_WRITE_BUDGET": "6500",
+    "EVEN_DAILY_WRITE_BUDGET": "50000",
     // Optional strings shown to users in /v1/info; empty means unset.
     "EVEN_OPERATOR": "",
     "EVEN_TERMS_URL": ""
