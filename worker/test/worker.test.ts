@@ -397,6 +397,44 @@ describe('rate limiting', () => {
     expect(requestLines().map((line) => line.limited)).toEqual([true, true]);
   });
 
+  it('the request limiter runs before any D1 read: a refused request is 429, never a 500 from D1', async () => {
+    const group = await freshGroup();
+    const unreachable = {
+      prepare: () => {
+        throw new Error('D1 was read');
+      },
+      batch: () => Promise.reject(new Error('D1 was read')),
+      exec: () => Promise.reject(new Error('D1 was read')),
+    } as unknown as D1Database;
+    const refused = { env: { DB: unreachable, RATE_REQUESTS: fakeLimiter(false) } };
+    const responses = [
+      await call('GET', '/v1/info', refused),
+      await read(group, '', refused),
+      await append(group, [envelope()], refused),
+      await call('DELETE', `/v1/groups/${group.groupId}`, { token: group.token, ...refused }),
+    ];
+    expect(responses.map((r) => r.status)).toEqual([429, 429, 429, 429]);
+    for (const response of responses)
+      expect(await body(response)).toMatchObject({ error: 'rate_limited' });
+    expect(lines.filter((line) => line.event === 'unhandled_exception')).toEqual([]);
+    // The same stub behind an allowing limiter is reached, so the 429s above were decided before it.
+    const allowed = { env: { DB: unreachable, RATE_REQUESTS: fakeLimiter(true) } };
+    expect((await call('GET', '/v1/info', allowed)).status).toBe(500);
+    expect((await read(group, '', allowed)).status).toBe(500);
+  });
+
+  it('a blocked group still counts against the request limiter, which answers first', async () => {
+    const group = await freshGroup();
+    await env.DB.prepare('INSERT INTO blocked (group_id, blocked_at) VALUES (?, ?)')
+      .bind(group.groupId, Date.now())
+      .run();
+    const limiter = fakeLimiter((key) => key !== '198.51.100.9');
+    const headers = { 'CF-Connecting-IP': '198.51.100.9' };
+    expect((await read(group, '', { env: { RATE_REQUESTS: limiter }, headers })).status).toBe(429);
+    expect((await read(group, '', { env: { RATE_REQUESTS: limiter } })).status).toBe(410);
+    expect(limiter.keys).toHaveLength(2);
+  });
+
   it('auth runs before any limiter: a wrong token never consumes one', async () => {
     const group = await freshGroup();
     const requests = fakeLimiter();

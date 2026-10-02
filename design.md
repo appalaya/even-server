@@ -119,10 +119,16 @@ Every group-scoped request runs the same prelude:
 2. Read the bearer token; `401 unauthorized` if not exactly 43 base64url chars.
 3. `expected = base64url(sha256(base64urlDecode(token)))`; compare with
    `groupId`; `401` on mismatch.
-4. `410 group_blocked` if `groupId` is in `blocked`. This applies to every
-   group-scoped route, including the reserved subscriptions route.
-5. Rate-limit check for the client IP (below). Auth runs first so that an
+4. Rate-limit check for the client IP (below). Auth runs first so that an
    unauthenticated flood cannot consume the creation limiter for a real group.
+   In the Worker this comes before any D1 read: the thresholds are binding
+   configuration, so a refused request costs no database rows. The Python
+   reference keeps its thresholds in the `limits` table and reads them (with
+   the blocklist and the group row, in one snapshot of the local file) first;
+   the order a client sees is the same.
+5. `410 group_blocked` if `groupId` is in `blocked`. This applies to every
+   group-scoped route, including the reserved subscriptions route. A blocked
+   group's requests count against the limiter like any other.
 
 No lookup is needed to authenticate. A group that does not exist is simply one
 with no rows.
@@ -193,7 +199,8 @@ write creates a fresh row with a fresh epoch.
 
 Assembled from the `limits` table (seeded from configuration at deploy or
 start), so what is published is exactly what the triggers and handlers
-enforce. No auth. Every enforced limit appears here, including the rate
+enforce. No auth. The Worker checks the request limiter before it reads the
+table. Every enforced limit appears here, including the rate
 limits and the daily write budget.
 
 ### Global write budget

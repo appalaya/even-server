@@ -159,7 +159,7 @@ Locally, `npm run db:seed` (or `db:seed:test`) does the seeding; `wrangler dev` 
 For the public server, set `EVEN_OPERATOR` and `EVEN_TERMS_URL` this way (`EVEN_DAILY_WRITE_BUDGET` is set). Each
 `ratelimits` `namespace_id` must be unique within the account; change them if another Worker already uses 4101–4103.
 
-A note on raising `EVEN_MAX_BATCH`: an append is one prelude batch (4 statements) plus one write batch
+A note on raising `EVEN_MAX_BATCH`: an append is one prelude batch (3 statements) plus one write batch
 (`max_batch` + 3), plus 2 more on a `413`. If D1 counts each batched statement toward the per-invocation query
 limit (50 on the free plan), the default of 25 leaves room and much above 40 would not; check the current D1 limits
 before raising it.
@@ -337,8 +337,12 @@ the log shows `{"level":"info","event":"expiry","groups_deleted":…,"retention_
 - Three Workers Rate Limiting bindings with 60-second periods, keyed by `CF-Connecting-IP` (IPv6 by /64). A `429`
   carries `Retry-After: 60`, the binding's period, since the binding does not report when its window ends. The
   platform's limits are approximate and per Cloudflare location, which is fine for abuse control.
+- The order is: authentication, the request limiter, then D1 (`/v1/info`: the limiter, then the `limits` table). An
+  unauthenticated flood consumes no limiter for a real group, and a refused request costs no D1 rows: the thresholds
+  are binding configuration, so nothing is read to apply them. A blocked group's requests count like any other, so
+  past the limit they get `429` rather than `410`.
 - The creation limiter is consulted only when the group had no row at the start of the request; the write limiter
-  only on appends; authentication runs first, so an unauthenticated flood consumes nothing for a real group.
+  only on appends.
 - A missing binding, or a limiter call that throws, allows the request and logs `ratelimit_binding_missing` /
   `ratelimit_binding_failed` once per isolate, so a self-deployed Worker without the bindings still works.
 - The daily write budget counts events stored per UTC day in `counters`, duplicates not counted: the append batch's
