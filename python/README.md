@@ -76,7 +76,7 @@ server runs makes requests fail with `500` rather than guess a value.
 | `EVEN_RATE_WRITES_PER_MINUTE` | `60` | Per client IP, append requests. |
 | `EVEN_RATE_GROUP_CREATES_PER_MINUTE` | `3` | Per client IP, first writes to new groups. |
 | `EVEN_RATE_READS_PER_MINUTE` | `120` | Per client IP, event reads (`GET …/events`). The default adds nothing to the request limit; the Cloudflare Worker sets 5 to protect its database's daily read quota, which a local SQLite file does not have. |
-| `EVEN_DAILY_WRITE_BUDGET` | `0` | Events stored per UTC day across the server, duplicates not counted. An append whose new events would pass it gets `503` and stores nothing; reads continue. `0` means no budget. |
+| `EVEN_DAILY_WRITE_BUDGET` | `6500` | Events stored per UTC day across the server, duplicates not counted. An append whose new events would pass it gets `503` and stores nothing; reads continue. `0` means no budget. **Read the storage note below.** |
 | `EVEN_TRUST_PROXY_HEADER` | unset | `X-Forwarded-For` or `CF-Connecting-IP`. **Read the warning below.** |
 | `EVEN_OPERATOR` | unset | Your name, shown to users in group settings. |
 | `EVEN_TERMS_URL` | unset | Link to your terms. |
@@ -87,15 +87,26 @@ server runs makes requests fail with `500` rather than guess a value.
 Rates are whole requests per minute over a sliding window, at least 1. IPv6
 clients are keyed by their /64. Rate-limit state lives only in memory.
 
+> **Storage.** There is no cap on the database's total size. What bounds its
+> growth is the daily write budget and expiry: by default at most 6,500 events
+> a day across all groups (the public server's value), and groups idle for
+> `EVEN_RETENTION_DAYS` are deleted. Even if every one of those events were the
+> largest allowed (8 KB of ciphertext, measured at about 12.5 KB on disk with
+> its indexes), that is at most about 81 MB a day, about 30 GB over a year at
+> the budget every single day; ordinary use is a small fraction of it. Size the
+> budget to your disk. Setting it to `0` removes the bound: within the per-IP
+> limits alone, one address could then add about 12 GB a day.
+
 > **Proxy header warning.** Behind Caddy, nginx, a Cloudflare Tunnel, or any
 > proxy, every request arrives from the proxy's address. Unless
 > `EVEN_TRUST_PROXY_HEADER` names the header your proxy sets, **all your users
 > share one rate-limit bucket** and will lock each other out. The reverse is
 > also a risk: if you set it while clients can reach the server directly,
 > they can forge the header and dodge the limits. So set it, and keep
-> `EVEN_HOST=127.0.0.1` so that only the proxy can connect. For
-> `X-Forwarded-For` the right-most address is used, which is the one your
-> proxy added.
+> `EVEN_HOST=127.0.0.1` so that only the proxy can connect. Every line of the
+> header is read, in order, and the right-most address wins: that is the one
+> your proxy added, whether it appends to the list or adds a line of its own.
+> Exactly one proxy is trusted, the one in front of the server.
 
 ## HTTPS with Caddy
 
@@ -107,6 +118,11 @@ Point a domain at the machine, open ports 80 and 443, and use
 sync.example.net {
 	reverse_proxy 127.0.0.1:8787 {
 		header_up X-Forwarded-For {remote_host}
+	}
+	handle_errors {
+		header Content-Type "application/json; charset=utf-8"
+		header Cache-Control no-store
+		respond `{"error":"server_error"}`
 	}
 }
 ```
@@ -122,6 +138,16 @@ Your server URL is `https://sync.example.net`.
 > header, and client addresses). Keep Caddy's global `debug` option off too.
 > The same applies to nginx (`access_log off;` in the location block) and to
 > anything else you put in front.
+
+> **Error-log warning.** Even with no `log` directive, when Caddy itself fails
+> a request (a `502` while this server is stopped or restarting, say) it logs
+> the error with the request URI and the client's address. The `handle_errors`
+> block above keeps those lines out: an error it answers is logged at DEBUG
+> level, which Caddy does not write unless `debug` is on, and the client gets a
+> protocol-shaped `{"error":"server_error"}` with `Cache-Control: no-store`.
+> (Not tested here: no Caddy was available where this was written.) For nginx,
+> keep the `error_log` level above `info`, or know that its lines name the
+> request.
 
 This server writes no access log of its own. uvicorn's access log is off, as
 is its WebSocket support (uvicorn logs every WebSocket handshake with the
@@ -173,6 +199,12 @@ relay, not the source of truth. If it is lost or deleted, the next sync sees
 a new epoch and the phones re-push everything. Backups are optional. The
 database runs in WAL mode with `synchronous=FULL`, because a write that was
 acknowledged and then lost in a power cut would otherwise never be re-sent.
+The server keeps one SQLite connection open for its whole life, shared by every
+request under a lock, so the file is not reopened per request.
+
+Expiry deletes whole groups, oldest first, a small batch at a time (at most
+100 groups and about 1,000 events per transaction), so a large backlog never
+stalls requests for long; it runs until nothing idle is left.
 
 ## Tests
 
@@ -195,6 +227,7 @@ EVEN_DB_PATH=/tmp/even-conformance.db \
 EVEN_MAX_GROUP_BYTES=65536 EVEN_MAX_GROUP_EVENTS=200 EVEN_MAX_PAGE=50 \
 EVEN_RATE_REQUESTS_PER_MINUTE=100000 EVEN_RATE_WRITES_PER_MINUTE=100000 \
 EVEN_RATE_GROUP_CREATES_PER_MINUTE=100000 EVEN_RATE_READS_PER_MINUTE=100000 \
+EVEN_DAILY_WRITE_BUDGET=0 \
 even-server
 ```
 
@@ -205,7 +238,8 @@ cd ../conformance && npm ci
 EVEN_SERVER_URL=http://127.0.0.1:8787 npx vitest run
 ```
 
-The rates are raised because the suite creates many groups from one address.
+The rates are raised because the suite creates many groups from one address,
+and the budget is off because each run stores a few hundred events.
 To include the blocklist test, get an id from `npm run blocked-id`, run
 `even-server block <id>` against the same database, and pass it as
 `EVEN_CONFORMANCE_BLOCKED_GROUP_ID`. Public servers should run the suite

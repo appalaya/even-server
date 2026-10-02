@@ -13,7 +13,7 @@ services:
       # EVEN_OPERATOR: "Your name"
       # EVEN_TERMS_URL: "https://example.net/even-terms"
       # EVEN_RETENTION_DAYS: "365"
-      # EVEN_DAILY_WRITE_BUDGET: "0"
+      # EVEN_DAILY_WRITE_BUDGET: "6500"   # events stored a day; 0 removes the bound (README.md, "Storage")
     ports:
       - "127.0.0.1:8787:8787"   # host loopback only: HTTPS comes from Caddy or a tunnel in front
     volumes:

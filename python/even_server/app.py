@@ -62,7 +62,8 @@ def create_app(config: Config, *, store: Store | None = None, limiter: RateLimit
 
     def client_key(request: Request) -> str:
         peer = request.client.host if request.client else None
-        return ip_key(client_address(peer, request.headers, config.trust_proxy_header))
+        lines = request.headers.getlist(config.trust_proxy_header) if config.trust_proxy_header else []
+        return ip_key(client_address(peer, lines))
 
     def enforce(key: str, *rules: tuple[SlidingWindow, int]) -> None:
         if wait := limiter.check(key, *rules):

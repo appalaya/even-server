@@ -18,18 +18,23 @@ type ClientFactory = Callable[..., TestClient]
 
 
 @pytest.fixture
-def make_client(tmp_path) -> ClientFactory:
+def make_client(tmp_path) -> Iterator[ClientFactory]:
     """make_client(EVEN_MAX_BATCH=3, client=("2001:db8::1", 1), limiter=...) -> TestClient
-    against a fresh database."""
+    against a fresh database. Each app's store (one SQLite connection) is closed afterwards."""
     numbers = itertools.count()
+    apps = []
 
     def make(*, client: tuple[str, int] = ("203.0.113.7", 50000), limiter: RateLimiter | None = None,
              **env: object) -> TestClient:
         values = {**TEST_ENV, "EVEN_DB_PATH": str(tmp_path / f"even-{next(numbers)}.db")}
         values |= {name: str(value) for name, value in env.items()}
-        return TestClient(create_app(Config.from_env(values), limiter=limiter), client=client)
+        app = create_app(Config.from_env(values), limiter=limiter)
+        apps.append(app)
+        return TestClient(app, client=client)
 
-    return make
+    yield make
+    for app in apps:
+        app.state.store.close()
 
 
 @pytest.fixture
@@ -58,3 +63,4 @@ def live_server(tmp_path) -> Iterator[str]:
     server.should_exit = True
     thread.join(timeout=10)
     sock.close()
+    app.state.store.close()

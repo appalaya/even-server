@@ -82,12 +82,12 @@ def main(argv: list[str] | None = None) -> int:
         case "block" | "unblock":
             return edit_blocklist(config, command, args.group_id, purge=getattr(args, "purge", False))
         case "expire-now":
-            store = _store(config)
-            try:
-                store.limits()
-            except LimitsMissing:  # never served yet: fall back to the environment's retention
-                store.seed_limits(config.limits)
-            print(f"expired {expire_once(store)} idle group(s)")
+            with _store(config) as store:
+                try:
+                    store.limits()
+                except LimitsMissing:  # never served yet: fall back to the environment's retention
+                    store.seed_limits(config.limits)
+                print(f"expired {expire_once(store)} idle group(s)")
             return 0
         case _:
             parser.error(f"unknown command {command}")
@@ -106,13 +106,13 @@ def edit_blocklist(config: Config, command: str, group_id: str, *, purge: bool) 
     if not auth.is_group_id(group_id):
         print("even-server: GROUP_ID must be 43 base64url characters", file=sys.stderr)
         return 2
-    store = _store(config)
-    if command == "block":
-        added = store.block(group_id, time.time_ns() // 1_000_000, purge=purge)
-        print("blocked" if added else "already blocked", end="")
-        print("; stored events deleted" if purge else "; stored events kept until expiry (use --purge to delete)")
-    else:
-        print("unblocked" if store.unblock(group_id) else "was not blocked")
+    with _store(config) as store:
+        if command == "block":
+            added = store.block(group_id, time.time_ns() // 1_000_000, purge=purge)
+            print("blocked" if added else "already blocked", end="")
+            print("; stored events deleted" if purge else "; stored events kept until expiry (use --purge to delete)")
+        else:
+            print("unblocked" if store.unblock(group_id) else "was not blocked")
     return 0
 
 
@@ -136,4 +136,6 @@ def serve(config: Config) -> int:
         uvicorn.run(app, host=config.host, port=config.port, **UVICORN_OPTIONS)  # type: ignore[arg-type]
     finally:
         expiry.stop()
+        expiry.join(timeout=5)
+        app.state.store.close()
     return 0

@@ -13,6 +13,19 @@ sync.example.net {
 		header_up X-Forwarded-For {remote_host}
 	}
 
+	# ERROR LOG: when Caddy itself fails a request (most often a 502 while the
+	# server is stopped or restarting), it logs the error at ERROR level with
+	# the request URI, which holds the group id, and the client's address, with
+	# or without a `log` directive. An error that `handle_errors` answers is
+	# logged at DEBUG instead, which Caddy does not write while the global
+	# `debug` option is off. This also answers in the protocol's error shape,
+	# so clients back off and retry. Keep it.
+	handle_errors {
+		header Content-Type "application/json; charset=utf-8"
+		header Cache-Control no-store
+		respond `{"error":"server_error"}`
+	}
+
 	# ACCESS LOG: Caddy writes none unless a `log` directive is present, and
 	# that is the right setting for Even. A `log` directive records every
 	# request URI, and Even's URIs contain group ids. If you must keep one,
@@ -45,5 +58,10 @@ sync.example.net {
 # 		reverse_proxy 127.0.0.1:8787 {
 # 			header_up X-Forwarded-For {remote_host}
 # 		}
+# 	}
+# 	handle_errors {
+# 		header Content-Type "application/json; charset=utf-8"
+# 		header Cache-Control no-store
+# 		respond `{"error":"server_error"}`
 # 	}
 # }

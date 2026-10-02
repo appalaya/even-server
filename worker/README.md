@@ -133,7 +133,7 @@ Every limit is a var in `wrangler.jsonc`, with the same names and defaults as th
 | `EVEN_RATE_WRITES_PER_MINUTE` | `60` | `RATE_WRITES` binding, appends |
 | `EVEN_RATE_GROUP_CREATES_PER_MINUTE` | `3` | `RATE_CREATES` binding, appends to a group with no row yet |
 | `EVEN_RATE_READS_PER_MINUTE` | `120`; **`5`** in `wrangler.jsonc`, the public server ([why](#event-reads-per-address)) | `RATE_READS` binding, event reads (`GET …/events`) |
-| `EVEN_DAILY_WRITE_BUDGET` | `0` (off); **`6500`** in `wrangler.jsonc`, the public server ([why](#the-daily-write-budget)) | `counters_budget` triggers, events stored per UTC day (duplicates not counted), all groups |
+| `EVEN_DAILY_WRITE_BUDGET` | `6500` ([why](#the-daily-write-budget)); `0` turns it off | `counters_budget` triggers, events stored per UTC day (duplicates not counted), all groups |
 | `EVEN_OPERATOR` | empty | `/v1/info` `operator` |
 | `EVEN_TERMS_URL` | empty | `/v1/info` `terms` |
 

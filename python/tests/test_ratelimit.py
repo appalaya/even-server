@@ -152,12 +152,28 @@ def test_ip_key(address, key):
     assert ip_key(address) == key
 
 
-def test_client_address_takes_the_rightmost_forwarded_entry():
-    headers = {"x-forwarded-for": "10.9.9.9, 198.51.100.4"}
-    assert client_address("127.0.0.1", headers, "x-forwarded-for") == "198.51.100.4"
-    assert client_address("127.0.0.1", {"x-forwarded-for": "garbage"}, "x-forwarded-for") == "127.0.0.1"
-    assert client_address("127.0.0.1", {}, "x-forwarded-for") == "127.0.0.1"
-    assert client_address("127.0.0.1", headers, None) == "127.0.0.1"
+def test_client_address_takes_the_rightmost_forwarded_entry_across_every_line():
+    assert client_address("127.0.0.1", ["10.9.9.9, 198.51.100.4"]) == "198.51.100.4"
+    # A proxy that adds its own line: the last line's last entry, never the client's first line.
+    assert client_address("127.0.0.1", ["192.0.2.66", "198.51.100.4"]) == "198.51.100.4"
+    assert client_address("127.0.0.1", ["192.0.2.66, 10.0.0.1", "198.51.100.4, 203.0.113.9"]) == "203.0.113.9"
+    assert client_address("127.0.0.1", ["garbage"]) == "127.0.0.1"
+    assert client_address("127.0.0.1", ["198.51.100.4", "garbage"]) == "127.0.0.1"
+    assert client_address("127.0.0.1", []) == "127.0.0.1"
+    assert client_address(None, []) == "unknown"
+
+
+def test_a_client_cannot_choose_its_key_with_an_extra_forwarded_line(make_client):
+    """Behind a proxy that appends its own X-Forwarded-For line, a client-sent
+    first line used to become the key; now the proxy's line decides."""
+    client = make_client(EVEN_RATE_REQUESTS_PER_MINUTE=1, EVEN_TRUST_PROXY_HEADER="X-Forwarded-For")
+
+    def info(*lines):
+        return client.get("/v1/info", headers=[("X-Forwarded-For", line) for line in lines]).status_code
+
+    assert info("192.0.2.1", "198.51.100.4") == 200
+    assert info("192.0.2.2", "198.51.100.4") == 429  # same real client, a different forged first line
+    assert info("192.0.2.1", "198.51.100.5") == 200  # a different real client
 
 
 def test_limiter_forgets_idle_keys():
