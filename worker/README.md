@@ -38,7 +38,8 @@ npm run dev                             # http://127.0.0.1:8787 with the product
 
 `npm run typecheck` checks `src/` and `test/` (TypeScript strict). `npm test` runs the Worker's own tests inside
 workerd through `@cloudflare/vitest-pool-workers`, against an in-memory D1 with `schema.sql` applied: the round trip,
-the triggers (including fail-closed when a cap row is missing), the daily budget (exact under concurrent appends),
+the triggers (including fail-closed when a cap row is missing), the daily budget (events stored, not appends; exact
+under concurrent appends),
 the blocklist, the rate-limit paths
 (with fake bindings), the log lines, and expiry. The conformance suite remains the definition of correctness.
 
@@ -131,7 +132,7 @@ Every limit is a var in `wrangler.jsonc`, with the same names and defaults as th
 | `EVEN_RATE_REQUESTS_PER_MINUTE` | `120` | `RATE_REQUESTS` binding, every request to a documented route |
 | `EVEN_RATE_WRITES_PER_MINUTE` | `60` | `RATE_WRITES` binding, appends |
 | `EVEN_RATE_GROUP_CREATES_PER_MINUTE` | `3` | `RATE_CREATES` binding, appends to a group with no row yet |
-| `EVEN_DAILY_WRITE_BUDGET` | `0` (off); **`500`** in `wrangler.jsonc`, the public server ([why](#the-daily-write-budget)) | `counters_budget` trigger, append requests per UTC day, all groups |
+| `EVEN_DAILY_WRITE_BUDGET` | `0` (off); **`7400`** in `wrangler.jsonc`, the public server ([why](#the-daily-write-budget)) | `counters_budget` triggers, events stored per UTC day (duplicates not counted), all groups |
 | `EVEN_OPERATOR` | empty | `/v1/info` `operator` |
 | `EVEN_TERMS_URL` | empty | `/v1/info` `terms` |
 
@@ -243,32 +244,50 @@ are not needed.
 
 ### The daily write budget
 
-The public server allows **500 append requests per UTC day**, across all groups (`EVEN_DAILY_WRITE_BUDGET`), so a
-whole day of appends at the budget, every one as expensive as an append can be, writes about half of D1's free
-100,000 rows.
+The public server stores at most **7,400 events per UTC day**, across all groups (`EVEN_DAILY_WRITE_BUDGET`,
+published as `limits.daily_write_budget`). It counts events stored, not append requests: an append of eight new
+events counts eight, and an envelope the group already holds counts nothing, so a device re-pushing what another
+device already stored costs nothing. A whole day at the budget writes at most about half of D1's free 100,000 rows,
+whatever shape the appends take.
 
 D1 counts one row written per table row inserted, updated or deleted, plus one per index entry the write touches.
 What one append writes, measured as `meta.rows_written` of the Worker's own batch against local D1:
 
 | Statement in the append batch | Rows written |
 |---|---:|
-| the day's counter: the first append of the UTC day inserts it (row + primary-key index) | 2 |
-| the day's counter: every later append updates it | 1 |
+| the day's counter: the first counted append of the UTC day inserts it (row + primary-key index) | 2 |
+| the day's counter: every later append that stores at least one event updates it | 1 |
+| the day's counter, when every envelope is a duplicate (the statement inserts and updates nothing) | 0 |
 | the group row, only when the group is new (row + primary-key index) | 2 |
 | each new event: the row, its two indexes `(group_id, seq)` and `(group_id, id)`, and the `events_count` trigger's update of the group row | 4 |
 | each duplicate event (`INSERT OR IGNORE` that inserts nothing) | 0 |
 
-An append therefore writes 1 + 4 × (new events) rows: at most 1 + 4 × 25 + 2 = 103 (a full `max_batch` to a new
-group), 104 for the first of the day. **500 × 104 = 52,000**, 52% of the daily limit. An append from the app usually
-carries one to three events (5 to 13 rows), so a busy real day at the budget is nearer 5,000.
+An event therefore costs 4 rows plus its append's overhead: 1 for the counter, and 2 more when the append creates its
+group. The dearest day is one where every event arrives alone, each in a new group: 7 rows an event, so
+**7 × 7,400 + 1 = 51,801**, 52% of the daily limit, the same share the earlier budget of 500 append requests
+(500 × 104 = 52,000) allowed. Every other shape costs less:
+
+| A day of 7,400 events, all arriving as | Rows written | Of 100,000 |
+|---|---:|---:|
+| one-event appends, each creating a group | 7 × 7,400 + 1 = 51,801 | 52% |
+| one-event appends to existing groups | 5 × 7,400 + 1 = 37,001 | 37% |
+| full 25-event appends to existing groups | 296 × 101 + 1 = 29,897 | 30% |
+
+The budget is not sized at 4 rows an event (about 15,000 a day for the same share): a day of one-event appends to new
+groups would then write 105,001 rows and pass the limit. What 7,400 means in use: a group re-pushed in full after
+an epoch change (expiry, a deleted server copy, a move to this server) costs its event count once, since every other
+device's re-push is duplicates; a 3,400-event group takes 46% of a day, and a group at the 10,000-event cap needs
+two days.
 
 The other 48,000 rows are for writes the budget does not count: deleting a group (`DELETE /v1/groups/{groupId}`), the
 daily expiry, and the 10 upserts of each deploy's seed. A delete writes one row per event and one for the group as
 measured locally; if D1 also counts the deleted index entries, as its documentation suggests, it is up to 3 per
 event. The headroom is 16,000 to 48,000 deleted events a day; a group at the 10,000-event cap costs 10,001 to 30,002
 rows. Deletes are bounded by what is stored, not by the budget, so a day of several deletes of full groups can still
-reach the limit. Reads are not the constraint for appends: one reads about 190 rows, so 500 of them read under
-100,000 of the 5 million.
+reach the limit. Reads are not the constraint for appends: an append reads about 8 rows per new event plus 6, and
+about 12 more in its prelude, so a day at the budget reads at most about 200,000 of the 5 million (all one-event
+appends). An append of duplicates only writes nothing and is not counted, but still reads about 5 rows per
+envelope; those are bounded per address by `EVEN_RATE_WRITES_PER_MINUTE`, not by the budget.
 
 The per-IP limits do not protect the Workers Free cap of 100,000 requests a day, and are not meant to. One client
 at `EVEN_RATE_REQUESTS_PER_MINUTE` (120) could make 172,800 requests a day and use the whole cap in about 14 hours;
@@ -279,7 +298,8 @@ day's reads in about 80 minutes, and D1 would then refuse every query until 00:0
 neither.
 
 To change the budget, edit the var and merge ([Changing a limit](#changing-a-limit)); the next deploy seeds it, and
-`/v1/info` publishes it as `limits.daily_write_budget`.
+`/v1/info` publishes it as `limits.daily_write_budget`. Size it in events, with 7 rows written per event as the worst
+case.
 
 ## Takedown (blocklist)
 
@@ -321,12 +341,12 @@ the log shows `{"level":"info","event":"expiry","groups_deleted":…,"retention_
   only on appends; authentication runs first, so an unauthenticated flood consumes nothing for a real group.
 - A missing binding, or a limiter call that throws, allows the request and logs `ratelimit_binding_missing` /
   `ratelimit_binding_failed` once per isolate, so a self-deployed Worker without the bindings still works.
-- The daily write budget counts append requests per UTC day in `counters`, incremented inside the append batch
-  (rolled back with it on `413`). Past the budget, appends get `503 over_budget` with `Retry-After` until UTC
-  midnight; reads continue. The `counters_budget` trigger refuses the increment inside the batch, so the budget is
-  exact however many appends are in flight, like the per-group caps. The handler also checks the count it read at
-  the start of the request, which only answers early once the day is spent (and keeps the budget approximately
-  enforced on a database whose schema predates the trigger).
+- The daily write budget counts events stored per UTC day in `counters`, duplicates not counted: the append batch's
+  first statement adds the number of the request's envelopes the group does not hold yet (rolled back with the
+  batch on `413`). An append whose new events would pass the budget gets `503 over_budget` with `Retry-After` until
+  UTC midnight and stores nothing; reads continue, and so does an append of duplicates only. The `counters_budget`
+  triggers refuse the count inside the batch, so the budget is exact however many appends are in flight, like the
+  per-group caps. There is no separate check in the handler.
 
 ## Logging and privacy
 
@@ -383,8 +403,10 @@ The Worker's only `503` is `over_budget`. It writes no separate event, only its 
 
 To see it, open **Workers & Pages → even-sync → Observability** and search for `"status":503`; Workers Logs keeps 3
 days on Free. The count behind it is in D1: in **D1 → even → Console**, run
-`SELECT day, writes FROM counters ORDER BY day DESC` (a week of days is kept). A day that tripped reads exactly
-the budget, `500`, because the trigger refuses every increment past it.
+`SELECT day, writes FROM counters ORDER BY day DESC` (a week of days is kept; `writes` is events stored). A day
+that tripped reads at most the budget, `7400`, and never more, because the triggers refuse any count past it. It can
+read a little less: an append is refused whole when its new events do not all fit, so the last refused append may
+have been larger than what was left (at most `max_batch`, 25).
 
 D1's own daily limits are different: once one is spent, every request that queries D1 answers `500` and logs
 `{"level":"error","event":"unhandled_exception","route":…,"exception":…}` until 00:00 UTC.

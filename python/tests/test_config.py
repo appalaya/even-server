@@ -71,8 +71,12 @@ def test_limit_variables_match_the_worker_and_design_md():
         r"variable: '(EVEN_\w+)',\s*key: '(\w+)',\s*fallback: ([\d_]+),\s*minimum: (\d+)", vars_ts.read_text())}
     assert worker == ours
 
-    top_level = wrangler.read_text().split('"env":')[0]  # the production vars, not env.test
-    assert {name: int(value) for name, value in re.findall(r'"(EVEN_\w+)": "(\d+)"', top_level)} == defaults
-
     documented = re.findall(r"^\| `(EVEN_\w+)` \| `(\d+)`", design.read_text(), re.MULTILINE)
     assert {name: int(value) for name, value in documented} == defaults
+
+    # The public server's vars are the defaults, except where design.md's table names its own value as
+    # "`<default>` (public server: `<value>`)".
+    public = {name: int(value) for name, value in re.findall(
+        r"^\| `(EVEN_\w+)` \| `\d+` \(public server: `(\d+)`\)", design.read_text(), re.MULTILINE)}
+    top_level = wrangler.read_text().split('"env":')[0]  # the production vars, not env.test
+    assert {name: int(value) for name, value in re.findall(r'"(EVEN_\w+)": "(\d+)"', top_level)} == defaults | public

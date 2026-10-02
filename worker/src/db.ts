@@ -10,8 +10,6 @@ export interface GroupState {
   limits: Limits;
   blocked: boolean;
   exists: boolean;
-  /** Append requests counted today (UTC), for the daily write budget. 0 unless asked for. */
-  writesToday: number;
 }
 
 export interface AppendResult {
@@ -59,39 +57,45 @@ const SELECT_LIMITS = 'SELECT key, value FROM limits';
 const INSERT_EVENT = `INSERT OR IGNORE INTO events (group_id, seq, id, v, n, c, size, created_at)
   SELECT ?1, COALESCE(MAX(seq), 0) + 1, ?2, ?3, ?4, ?5, ?6, ?7 FROM events WHERE group_id = ?1`;
 
+/**
+ * The daily write budget counts events stored (design.md, "Global write budget"). Run first in the append batch, this
+ * adds to the day's counter the number of the request's ids (already unique) that the group does not hold yet, which
+ * is exactly the number of inserts that will change a row: the batch is one transaction and D1 serialises writes.
+ * When every envelope is a duplicate the SELECT yields no row, so nothing is written at all. The counters_budget
+ * triggers refuse a count past the budget. `WHERE n > 0` also settles the parser's INSERT … SELECT … ON CONFLICT
+ * ambiguity, as SQLite's documentation asks.
+ */
+const COUNT_NEW_EVENTS = `INSERT INTO counters (day, writes)
+  SELECT ?1, n FROM (
+    SELECT COUNT(*) AS n FROM json_each(?2) AS j
+     WHERE NOT EXISTS (SELECT 1 FROM events WHERE events.group_id = ?3 AND events.id = j.value)
+  ) WHERE n > 0
+  ON CONFLICT (day) DO UPDATE SET writes = writes + excluded.writes`;
+
 export async function loadLimits(db: D1Database): Promise<Limits> {
   const { results } = await db.prepare(SELECT_LIMITS).all<{ key: unknown; value: unknown }>();
   return limitsFromRows(results);
 }
 
-/** Everything the request prelude needs, in one round trip: limits, blocklist, existence, and today's writes. */
-export async function groupState(
-  db: D1Database,
-  groupId: string,
-  day?: string,
-): Promise<GroupState> {
-  const statements = [
+/** Everything the request prelude needs, in one round trip: limits, blocklist, and existence. */
+export async function groupState(db: D1Database, groupId: string): Promise<GroupState> {
+  const [limits, blocked, group] = await db.batch<Record<string, unknown>>([
     db.prepare(SELECT_LIMITS),
     db.prepare('SELECT 1 AS hit FROM blocked WHERE group_id = ?').bind(groupId),
     db.prepare('SELECT 1 AS hit FROM groups WHERE id = ?').bind(groupId),
-  ];
-  if (day !== undefined)
-    statements.push(db.prepare('SELECT writes FROM counters WHERE day = ?').bind(day));
-  const [limits, blocked, group, counter] = await db.batch<Record<string, unknown>>(statements);
-  const writes = counter?.results[0]?.writes;
+  ]);
   return {
     limits: limitsFromRows((limits?.results ?? []) as Array<{ key: unknown; value: unknown }>),
     blocked: (blocked?.results.length ?? 0) > 0,
     exists: (group?.results.length ?? 0) > 0,
-    writesToday: typeof writes === 'number' ? writes : 0,
   };
 }
 
 /**
  * Stores `envelopes` (already de-duplicated within the request) in one atomic batch (design.md, "Append"):
- * the day's write counter, the group row if it is new (`epoch` is used only then), one insert per envelope in
- * request order, and a final read of the group's epoch and highest seq. Throws OverBudget if the budget trigger fired
- * on the counter, GroupFull if the cap trigger fired on an insert; either way the whole batch is rolled back.
+ * the day's count of events stored, the group row if it is new (`epoch` is used only then), one insert per envelope
+ * in request order, and a final read of the group's epoch and highest seq. Throws OverBudget if a budget trigger
+ * fired on the counter, GroupFull if the cap trigger fired on an insert; either way the whole batch is rolled back.
  */
 export async function append(
   db: D1Database,
@@ -100,11 +104,7 @@ export async function append(
   { epoch, nowMs, day }: { epoch: string; nowMs: number; day: string },
 ): Promise<AppendResult> {
   const statements = [
-    db
-      .prepare(
-        'INSERT INTO counters (day, writes) VALUES (?, 1) ON CONFLICT (day) DO UPDATE SET writes = writes + 1',
-      )
-      .bind(day),
+    db.prepare(COUNT_NEW_EVENTS).bind(day, JSON.stringify(envelopes.map((e) => e.id)), groupId),
     db
       .prepare(
         'INSERT OR IGNORE INTO groups (id, epoch, created_at, last_write_at) VALUES (?, ?, ?, ?)',

@@ -231,15 +231,17 @@ describe('limits table', () => {
 });
 
 describe('daily write budget', () => {
+  const today = (): string => new Date().toISOString().slice(0, 10);
+  const counter = async (day = today()): Promise<number> =>
+    (
+      await env.DB.prepare('SELECT writes FROM counters WHERE day = ?')
+        .bind(day)
+        .first<{ writes: number }>()
+    )?.writes ?? 0;
+
   it('past the budget, appends get 503 over_budget with Retry-After until UTC midnight; reads continue', async () => {
     const group = await freshGroup();
-    const day = new Date().toISOString().slice(0, 10);
-    const used =
-      (
-        await env.DB.prepare('SELECT writes FROM counters WHERE day = ?')
-          .bind(day)
-          .first<{ writes: number }>()
-      )?.writes ?? 0;
+    const used = await counter();
     await withLimits({ daily_write_budget: used + 1 }, async () => {
       expect((await append(group, [envelope()])).status).toBe(200);
       const over = await append(group, [envelope()]);
@@ -253,14 +255,62 @@ describe('daily write budget', () => {
     });
   });
 
+  it('counts events stored, not appends: duplicates are free, and an append that does not fit stores nothing', async () => {
+    const group = await freshGroup();
+    const used = await counter();
+    await withLimits({ daily_write_budget: used + 4 }, async () => {
+      const [a, b, c] = [envelope(), envelope(), envelope()];
+      // 2 new events (the in-request repeat of `a` is one event): the day's count goes up by 2, not 1.
+      expect(await body(await append(group, [a, b, a]))).toMatchObject({
+        accepted: 2,
+        duplicates: 1,
+      });
+      expect(await counter()).toBe(used + 2);
+      // 3 new events would pass the budget by 1: refused whole, nothing stored, nothing counted.
+      const over = await append(group, [c, envelope(), envelope()]);
+      expect(over.status).toBe(503);
+      expect(await counter()).toBe(used + 2);
+      expect(await body(await read(group))).toMatchObject({ next: 2 });
+      // A duplicate alongside new events counts only the new ones: 2 more fills the day exactly.
+      expect(await body(await append(group, [a, c, envelope()]))).toMatchObject({
+        accepted: 2,
+        duplicates: 1,
+      });
+      expect(await counter()).toBe(used + 4);
+      // On a spent day, an append of duplicates only still succeeds, and writes no row at all.
+      const before = await env.DB.prepare('SELECT COUNT(*) AS n FROM counters').first('n');
+      expect(await body(await append(group, [a, b, c]))).toMatchObject({
+        accepted: 0,
+        duplicates: 3,
+        seq: 4,
+      });
+      expect(await counter()).toBe(used + 4);
+      expect(await env.DB.prepare('SELECT COUNT(*) AS n FROM counters').first('n')).toBe(before);
+      expect((await append(group, [envelope()])).status).toBe(503);
+    });
+  });
+
+  it('the first counted append of a day is checked too: one append can carry more events than the budget', async () => {
+    const group = await freshGroup();
+    await withLimits({ daily_write_budget: 2 }, async () => {
+      // A new day's row is inserted with the append's count; three events against a budget of two is refused.
+      await env.DB.prepare('DELETE FROM counters WHERE day = ?').bind(today()).run();
+      const over = await append(group, [envelope(), envelope(), envelope()]);
+      expect(over.status).toBe(503);
+      expect(await body(over)).toMatchObject({ error: 'over_budget' });
+      expect(
+        await env.DB.prepare('SELECT COUNT(*) AS n FROM counters WHERE day = ?')
+          .bind(today())
+          .first('n'),
+      ).toBe(0);
+      expect(await body(await append(group, [envelope(), envelope()]))).toMatchObject({
+        accepted: 2,
+      });
+      expect(await counter()).toBe(2);
+    });
+  });
+
   it('is exact under concurrency: appends in flight at the boundary cannot overshoot it', async () => {
-    const day = new Date().toISOString().slice(0, 10);
-    const counter = async (): Promise<number> =>
-      (
-        await env.DB.prepare('SELECT writes FROM counters WHERE day = ?')
-          .bind(day)
-          .first<{ writes: number }>()
-      )?.writes ?? 0;
     const used = await counter();
     await withLimits({ daily_write_budget: used + 3 }, async () => {
       // Every request reads the counter before any of them writes it, so a check in application code alone passes
@@ -281,22 +331,26 @@ describe('daily write budget', () => {
     });
   });
 
-  it('the counters_budget trigger refuses an increment past the budget, and fails closed without its row', async () => {
+  it('the counters_budget triggers refuse a count past the budget, on insert and update, and fail closed without the row', async () => {
     const day = '1999-12-31';
-    const bump = env.DB.prepare(
-      'INSERT INTO counters (day, writes) VALUES (?, 1) ON CONFLICT (day) DO UPDATE SET writes = writes + 1',
-    ).bind(day);
+    const add = (n: number): D1PreparedStatement =>
+      env.DB.prepare(
+        'INSERT INTO counters (day, writes) VALUES (?, ?) ON CONFLICT (day) DO UPDATE SET writes = writes + excluded.writes',
+      ).bind(day, n);
     try {
-      await withLimits({ daily_write_budget: 2 }, async () => {
-        await bump.run();
-        await bump.run();
-        await expect(bump.run()).rejects.toThrow(/over_budget/);
+      await withLimits({ daily_write_budget: 5 }, async () => {
+        await expect(add(6).run()).rejects.toThrow(/over_budget/); // the day's first row, already past it
+        await add(3).run();
+        await add(2).run(); // exactly the budget
+        await expect(add(1).run()).rejects.toThrow(/over_budget/);
       });
       await withLimits({ daily_write_budget: 0 }, async () => {
-        await bump.run(); // 0 means no budget
+        await add(100).run(); // 0 means no budget
       });
       await env.DB.prepare("DELETE FROM limits WHERE key = 'daily_write_budget'").run();
-      await expect(bump.run()).rejects.toThrow(/over_budget/);
+      await expect(add(1).run()).rejects.toThrow(/over_budget/);
+      await env.DB.prepare('DELETE FROM counters WHERE day = ?').bind(day).run();
+      await expect(add(1).run()).rejects.toThrow(/over_budget/);
     } finally {
       await env.DB.prepare('DELETE FROM counters WHERE day = ?').bind(day).run();
       await seedLimits();

@@ -105,11 +105,11 @@ interface Prelude {
  * limiter (429). Auth runs before anything that touches the database or a limiter, so an unauthenticated flood
  * cannot consume a real group's creation budget or learn whether it exists.
  */
-async function prelude(request: Request, env: Env, route: Route, day?: string): Promise<Prelude> {
+async function prelude(request: Request, env: Env, route: Route): Promise<Prelude> {
   const groupId = decodeSegment(route.groupId ?? '');
   checkGroupId(groupId);
   await authenticate(groupId, request.headers.get('Authorization'));
-  const state = await store.groupState(env.DB, groupId, day);
+  const state = await store.groupState(env.DB, groupId);
   checkDrift(state.limits, env);
   if (state.blocked)
     throw new ApiError(410, 'group_blocked', 'this group is blocked on this server');
@@ -155,9 +155,7 @@ async function info(request: Request, env: Env): Promise<Response> {
 // ---------- §6.2 append ----------
 
 async function appendEvents(request: Request, env: Env, route: Route): Promise<Response> {
-  const now = new Date();
-  const day = now.toISOString().slice(0, 10);
-  const { groupId, state, key } = await prelude(request, env, route, day);
+  const { groupId, state, key } = await prelude(request, env, route);
   const { limits } = state;
 
   const envelopes = parseAppendBody(await readJsonBody(request, maxBodyBytes(limits)), limits);
@@ -165,11 +163,10 @@ async function appendEvents(request: Request, env: Env, route: Route): Promise<R
   if (!(await allow(env.RATE_WRITES, 'RATE_WRITES', key))) throw rateLimited();
   if (!state.exists && !(await allow(env.RATE_CREATES, 'RATE_CREATES', key))) throw rateLimited();
 
-  // The counters_budget trigger enforces the budget exactly, inside the append batch. This check against the count
-  // read in the prelude only answers early once the day is spent, without running a batch that would be refused.
-  if (limits.daily_write_budget > 0 && state.writesToday >= limits.daily_write_budget)
-    throw overBudget(now);
-
+  // The daily write budget counts events stored. The counters_budget triggers enforce it inside the append batch,
+  // exactly, so there is no check here: an append of duplicates only stores nothing and passes even on a spent day.
+  const now = new Date();
+  const day = now.toISOString().slice(0, 10);
   const unique = firstOccurrences(envelopes);
   let result: store.AppendResult;
   try {

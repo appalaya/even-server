@@ -9,6 +9,7 @@ of leaving them to SQLite's busy-wait; the SQLite lock still covers other
 processes (for example `even-server block` run from a shell).
 """
 
+import json
 import sqlite3
 import threading
 from collections.abc import Iterator, Sequence
@@ -25,6 +26,21 @@ SCHEMA = files(__package__).joinpath("schema.sql").read_text("utf-8")
 INSERT_EVENT = """
 INSERT OR IGNORE INTO events (group_id, seq, id, v, n, c, size, created_at)
   SELECT ?, COALESCE(MAX(seq), 0) + 1, ?, ?, ?, ?, ?, ? FROM events WHERE group_id = ?
+"""
+
+# The daily write budget counts events stored (design.md, "Global write budget"),
+# as in the Worker. Run first in the append transaction, this adds the number of
+# the request's ids (already unique) that the group does not hold yet, which is
+# exactly the number of inserts that will change a row, since the transaction
+# holds the write lock. All duplicates: the SELECT yields no row and nothing is
+# written. The counters_budget triggers refuse a count past the budget.
+COUNT_NEW_EVENTS = """
+INSERT INTO counters (day, writes)
+  SELECT ?1, n FROM (
+    SELECT COUNT(*) AS n FROM json_each(?2) AS j
+     WHERE NOT EXISTS (SELECT 1 FROM events WHERE events.group_id = ?3 AND events.id = j.value)
+  ) WHERE n > 0
+  ON CONFLICT (day) DO UPDATE SET writes = writes + excluded.writes
 """
 
 
@@ -146,17 +162,13 @@ class Store:
         """Store `envelopes` (already de-duplicated within the request) atomically.
 
         `epoch` is used only if this write creates the group. Raises `OverBudget`
-        (the budget trigger refused the day's counter) or `GroupFull` (the cap
-        trigger refused an insert); either way nothing is stored and the counter
-        is not bumped.
+        (a budget trigger refused the day's count of events stored) or
+        `GroupFull` (the cap trigger refused an insert); either way nothing is
+        stored and the count is unchanged.
         """
         with self._write() as conn:
             try:
-                conn.execute(
-                    "INSERT INTO counters (day, writes) VALUES (?, 1)"
-                    " ON CONFLICT (day) DO UPDATE SET writes = writes + 1",
-                    (day,),
-                )
+                conn.execute(COUNT_NEW_EVENTS, (day, json.dumps([e.id for e in envelopes]), group_id))
             except sqlite3.IntegrityError as exc:
                 if "over_budget" not in str(exc):
                     raise

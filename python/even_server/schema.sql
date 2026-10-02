@@ -13,7 +13,7 @@ CREATE TABLE IF NOT EXISTS blocked (    -- operator takedowns -> 410 group_block
 
 CREATE TABLE IF NOT EXISTS counters (   -- global daily write budget
   day    TEXT PRIMARY KEY,              -- 'YYYY-MM-DD' UTC
-  writes INTEGER NOT NULL
+  writes INTEGER NOT NULL               -- events stored that day, duplicates not counted
 );
 
 CREATE TABLE IF NOT EXISTS groups (
@@ -61,10 +61,20 @@ BEGIN
    WHERE id = NEW.group_id;
 END;
 
--- The daily write budget, checked inside the append batch as the counter is bumped, so appends in flight at the
--- boundary cannot overshoot it. 0 means no budget; a missing row fails CLOSED. The first append of a day inserts
--- writes = 1, which no budget of at least 1 refuses, so only the update needs checking.
+-- The daily write budget counts events stored, duplicates not counted. The append batch adds the number of its
+-- envelopes not yet in the group to the day's counter (nothing at all when every one is a duplicate), and these
+-- triggers refuse a count past the budget, so appends in flight at the boundary cannot overshoot it. 0 means no
+-- budget; a missing row fails CLOSED. The first counted append of a day inserts its count, which can already pass a
+-- small budget, so the insert is checked as well as the update. (An upsert fires the BEFORE INSERT trigger even
+-- when it goes on to update, with NEW.writes = that append's count; refusing it then is right too.)
 CREATE TRIGGER IF NOT EXISTS counters_budget BEFORE UPDATE OF writes ON counters
+WHEN NEW.writes > COALESCE((SELECT value FROM limits WHERE key = 'daily_write_budget'), 0)
+ AND (SELECT value FROM limits WHERE key = 'daily_write_budget') IS NOT 0
+BEGIN
+  SELECT RAISE(ABORT, 'over_budget');
+END;
+
+CREATE TRIGGER IF NOT EXISTS counters_budget_insert BEFORE INSERT ON counters
 WHEN NEW.writes > COALESCE((SELECT value FROM limits WHERE key = 'daily_write_budget'), 0)
  AND (SELECT value FROM limits WHERE key = 'daily_write_budget') IS NOT 0
 BEGIN

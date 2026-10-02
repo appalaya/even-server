@@ -35,7 +35,7 @@ CREATE TABLE blocked (                  -- operator takedowns → 410 group_bloc
 
 CREATE TABLE counters (                 -- global daily write budget
   day    TEXT PRIMARY KEY,              -- 'YYYY-MM-DD' UTC
-  writes INTEGER NOT NULL
+  writes INTEGER NOT NULL               -- events stored that day, duplicates not counted
 );
 
 CREATE TABLE groups (
@@ -84,11 +84,19 @@ BEGIN
    WHERE id = NEW.group_id;
 END;
 
--- The daily write budget, checked as the append batch bumps the day's counter,
--- so appends in flight at the boundary cannot overshoot it. 0 means no budget;
--- a missing row fails CLOSED. The first append of a day inserts writes = 1,
--- which no budget of at least 1 refuses, so only the update is checked.
+-- The daily write budget, in events stored, checked as the append batch adds
+-- its new events to the day's counter, so appends in flight at the boundary
+-- cannot overshoot it. 0 means no budget; a missing row fails CLOSED. The
+-- first counted append of a day inserts its count, which can already pass a
+-- small budget, so the insert is checked as well as the update.
 CREATE TRIGGER counters_budget BEFORE UPDATE OF writes ON counters
+WHEN NEW.writes > COALESCE((SELECT value FROM limits WHERE key = 'daily_write_budget'), 0)
+ AND (SELECT value FROM limits WHERE key = 'daily_write_budget') IS NOT 0
+BEGIN
+  SELECT RAISE(ABORT, 'over_budget');
+END;
+
+CREATE TRIGGER counters_budget_insert BEFORE INSERT ON counters
 WHEN NEW.writes > COALESCE((SELECT value FROM limits WHERE key = 'daily_write_budget'), 0)
  AND (SELECT value FROM limits WHERE key = 'daily_write_budget') IS NOT 0
 BEGIN
@@ -99,8 +107,8 @@ END;
 `bytes` counts stored size as the protocol defines it (decoded ciphertext plus
 64), not base64 length, so the published cap means what it says. The trigger
 pair on `events` is the whole cap and accounting implementation; nothing in
-application code sums bytes. `counters_budget` does the same for the daily
-write budget.
+application code sums bytes. The two `counters_budget` triggers do the same
+for the daily write budget.
 
 ## Request handling
 
@@ -130,8 +138,12 @@ with no rows.
    creation limiter.
 4. Run one atomic batch:
    ```sql
-   INSERT INTO counters (day, writes) VALUES (?, 1)
-     ON CONFLICT (day) DO UPDATE SET writes = writes + 1;   -- today, UTC
+   -- today (UTC) += the request's ids the group does not hold yet; no row at all when that is 0
+   INSERT INTO counters (day, writes)
+     SELECT ?, n FROM (SELECT COUNT(*) AS n FROM json_each(?) AS j    -- the ids, as a JSON array
+                        WHERE NOT EXISTS (SELECT 1 FROM events WHERE group_id = ? AND id = j.value))
+      WHERE n > 0
+     ON CONFLICT (day) DO UPDATE SET writes = writes + excluded.writes;
    INSERT OR IGNORE INTO groups (id, epoch, created_at, last_write_at) VALUES (?, ?, ?, ?);
    -- one per envelope, in request order:
    INSERT OR IGNORE INTO events (group_id, seq, id, v, n, c, size, created_at)
@@ -141,10 +153,12 @@ with no rows.
    Each insert computes its own `seq` from `MAX(seq)` inside the statement, so
    consecutive inserts in the batch get consecutive values. `INSERT OR IGNORE`
    skips duplicates by the `(group_id, id)` unique constraint without touching
-   `seq`. The budget trigger aborts the whole batch if the counter would pass
-   the daily budget, and the cap trigger if any insert would exceed a cap; the
-   batch rolls back, counter included, and the handler maps `over_budget` to
-   `503` and `group_full` to `413`.
+   `seq`. The counter statement runs first and counts exactly the inserts that
+   will change a row, since nothing else can write in between. A budget trigger
+   aborts the whole batch if the count would pass the daily budget, and the cap
+   trigger if any insert would exceed a cap; the batch rolls back, counter
+   included, and the handler maps `over_budget` to `503` and `group_full` to
+   `413`.
 5. `accepted` = number of inserts that changed a row (from the driver's
    per-statement change count); `duplicates` = envelopes − accepted. Return
    `{ accepted, duplicates, seq, epoch }`.
@@ -184,15 +198,18 @@ limits and the daily write budget.
 
 ### Global write budget
 
-The public server keeps a daily counter of write requests in `counters`,
-incremented in the append batch, where the `counters_budget` trigger refuses
-an increment past `EVEN_DAILY_WRITE_BUDGET`, so the budget is exact however
-many appends are in flight. Past it, appends return `503 over_budget` with
-`Retry-After` until midnight UTC; reads continue. (The Worker also checks the
-count it read in the request prelude, which only answers early once the day
-is spent.)
+The budget counts **events stored** per UTC day across all groups, not append
+requests, and not duplicates: what costs storage and database writes is a new
+event, whether it arrives alone or in a full batch. The append batch adds its
+new events to the day's counter in `counters`, where the `counters_budget`
+triggers refuse a count past `EVEN_DAILY_WRITE_BUDGET`, so the budget is exact
+however many appends are in flight. An append that would pass it is refused
+whole with `503 over_budget` and `Retry-After` until midnight UTC, even when a
+smaller one would still fit; reads continue, and so does an append of
+duplicates only, which stores and counts nothing.
 This bounds the free tier's row-write quota and, on a paid plan, the bill.
-`0` disables it, and the value is published in `/v1/info` either way.
+`0` disables it, and the value is published in `/v1/info` as
+`limits.daily_write_budget` either way.
 
 ### Takedown
 
@@ -219,7 +236,7 @@ them at deploy or start.
 | `EVEN_RATE_REQUESTS_PER_MINUTE` | `120` | Per IP, all endpoints |
 | `EVEN_RATE_WRITES_PER_MINUTE` | `60` | Per IP, append. A whole group behind one NAT shares this, and everyone re-pushes at once after an epoch change, hence not lower |
 | `EVEN_RATE_GROUP_CREATES_PER_MINUTE` | `3` | Per IP, first write to a new group |
-| `EVEN_DAILY_WRITE_BUDGET` | `0` (public server: set) | Append, global |
+| `EVEN_DAILY_WRITE_BUDGET` | `0` (public server: `7400`) | Append, global: events stored per UTC day, duplicates not counted |
 | `EVEN_TRUST_PROXY_HEADER` | unset | Python: `CF-Connecting-IP` or `X-Forwarded-For` |
 | `EVEN_OPERATOR` | unset | `/v1/info` |
 | `EVEN_TERMS_URL` | unset | `/v1/info` |
