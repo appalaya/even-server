@@ -127,6 +127,9 @@ def create_app(config: Config, *, store: Store | None = None, limiter: RateLimit
             "duplicates": len(envelopes) - result.accepted,
             "seq": result.seq,
             "epoch": result.epoch,
+            # One per envelope sent, in request order, repeats included: the
+            # value stored for its id (section 6.2).
+            "received_at": [result.received_at[e.id] for e in envelopes],
         })
 
     @app.get("/v1/groups/{groupId}/events")

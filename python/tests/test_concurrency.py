@@ -41,9 +41,15 @@ def test_concurrent_appends_produce_gapless_contiguous_seq(live_server):
 
     assert [e["seq"] for e in events] == list(range(1, total + 1))  # no gaps, no duplicates
     seq_of = {e["id"]: e["seq"] for e in events}
+    received_at = {e["id"]: e["received_at"] for e in events}
     assert len(seq_of) == total
     assert len({ack["epoch"] for _, ack in results}) == 1
     for ids, ack in results:
         seqs = [seq_of[i] for i in ids]
         assert seqs == list(range(seqs[0], seqs[0] + BATCH))  # contiguous, in request order
         assert (ack["accepted"], ack["duplicates"], ack["seq"]) == (BATCH, 0, seqs[-1])
+        # One received_at per request, reported alike by push and pull.
+        assert ack["received_at"] == [received_at[i] for i in ids] == [ack["received_at"][0]] * BATCH
+    # Strictly increasing across requests, in seq order, however close together they arrived.
+    by_seq = [ack["received_at"][0] for _, ack in sorted(results, key=lambda r: seq_of[r[0][0]])]
+    assert all(earlier < later for earlier, later in zip(by_seq, by_seq[1:]))
