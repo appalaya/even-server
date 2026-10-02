@@ -27,13 +27,14 @@ export const LIMIT_VARIABLES = [
     fallback: 3,
     minimum: 1,
   },
+  { variable: 'EVEN_RATE_READS_PER_MINUTE', key: 'reads_per_minute', fallback: 120, minimum: 1 },
   { variable: 'EVEN_DAILY_WRITE_BUDGET', key: 'daily_write_budget', fallback: 0, minimum: 0 }, // 0 = no budget
 ] as const;
 
 export type LimitKey = (typeof LIMIT_VARIABLES)[number]['key'];
 
 /**
- * The three Workers Rate Limiting bindings and the variable each one's threshold must equal. The binding thresholds
+ * The four Workers Rate Limiting bindings and the variable each one's threshold must equal. The binding thresholds
  * live in wrangler.jsonc next to the vars; the seed script refuses to seed when they disagree, so the rate published
  * in /v1/info is the rate the platform enforces.
  */
@@ -41,6 +42,7 @@ export const RATE_BINDINGS = [
   { binding: 'RATE_REQUESTS', variable: 'EVEN_RATE_REQUESTS_PER_MINUTE' },
   { binding: 'RATE_WRITES', variable: 'EVEN_RATE_WRITES_PER_MINUTE' },
   { binding: 'RATE_CREATES', variable: 'EVEN_RATE_GROUP_CREATES_PER_MINUTE' },
+  { binding: 'RATE_READS', variable: 'EVEN_RATE_READS_PER_MINUTE' },
 ] as const;
 
 /** Every rate is per minute: the Rate Limiting binding supports 10- and 60-second periods only. */

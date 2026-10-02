@@ -28,6 +28,7 @@ LIMIT_VARIABLES: tuple[tuple[str, str, int, int], ...] = (
     ("EVEN_RATE_REQUESTS_PER_MINUTE", "requests_per_minute", 120, 1),
     ("EVEN_RATE_WRITES_PER_MINUTE", "writes_per_minute", 60, 1),
     ("EVEN_RATE_GROUP_CREATES_PER_MINUTE", "group_creates_per_minute", 3, 1),
+    ("EVEN_RATE_READS_PER_MINUTE", "reads_per_minute", 120, 1),
     ("EVEN_DAILY_WRITE_BUDGET", "daily_write_budget", 0, 0),  # 0 = no budget
 )
 

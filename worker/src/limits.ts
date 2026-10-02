@@ -55,6 +55,7 @@ export interface InfoDocument {
       requests_per_minute: number;
       writes_per_minute: number;
       group_creates_per_minute: number;
+      reads_per_minute: number;
     };
   };
   retention_days: number;
@@ -77,6 +78,7 @@ export function infoDocument(limits: Limits, operator: unknown, terms: unknown):
         requests_per_minute: limits.requests_per_minute,
         writes_per_minute: limits.writes_per_minute,
         group_creates_per_minute: limits.group_creates_per_minute,
+        reads_per_minute: limits.reads_per_minute,
       },
     },
     retention_days: limits.retention_days,

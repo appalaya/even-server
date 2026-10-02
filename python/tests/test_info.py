@@ -24,6 +24,7 @@ def test_info_shape_matches_configuration(make_client):
                 "requests_per_minute": 500,
                 "writes_per_minute": 100000,
                 "group_creates_per_minute": 100000,
+                "reads_per_minute": 100000,
             },
         },
         "retention_days": 30,
@@ -53,7 +54,8 @@ def test_limits_table_is_seeded_on_start(client):
     assert rows == {
         "max_event_bytes": 8192, "max_group_bytes": 65536, "max_group_events": 200, "max_batch": 25,
         "max_page": 500, "daily_write_budget": 0, "requests_per_minute": 100000,
-        "writes_per_minute": 100000, "group_creates_per_minute": 100000, "retention_days": 365,
+        "writes_per_minute": 100000, "group_creates_per_minute": 100000, "reads_per_minute": 100000,
+        "retention_days": 365,
     }
 
 

@@ -1,6 +1,7 @@
 /**
- * Per-IP rate limits (design.md, "Rate limiting") through three Workers Rate Limiting bindings with 60-second
- * periods: all requests, append requests, and group creations. Keyed by CF-Connecting-IP, IPv6 by its /64.
+ * Per-IP rate limits (design.md, "Rate limiting") through four Workers Rate Limiting bindings with 60-second
+ * periods: all requests, append requests, group creations, and event reads. Keyed by CF-Connecting-IP, IPv6 by
+ * its /64.
  *
  * The limits are approximate and per Cloudflare location, which is fine for abuse control. The key goes to the
  * platform's limiter and nowhere else: it is never logged and never stored in D1.
@@ -9,7 +10,7 @@ import { ApiError } from './http';
 import { logEvent } from './log';
 import { RATE_PERIOD_SECONDS } from './vars';
 
-export type LimiterName = 'RATE_REQUESTS' | 'RATE_WRITES' | 'RATE_CREATES';
+export type LimiterName = 'RATE_REQUESTS' | 'RATE_WRITES' | 'RATE_CREATES' | 'RATE_READS';
 
 export function rateLimited(): ApiError {
   // The binding does not say when its window ends; a full period is the honest upper bound.

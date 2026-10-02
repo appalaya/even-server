@@ -1,7 +1,7 @@
 """Per-IP sliding-window rate limits, in memory only (design.md, "Rate limiting").
 
-Three windows of one minute each: all requests, append requests, and group
-creations. IPv6 clients are keyed by their /64. This is the only per-IP state
+Four windows of one minute each: all requests, append requests, group
+creations, and event reads. IPv6 clients are keyed by their /64. This is the only per-IP state
 the server keeps; it never touches the database and forgets a key once its
 window has passed.
 """
@@ -53,6 +53,7 @@ class RateLimiter:
         self.requests = SlidingWindow()
         self.writes = SlidingWindow()
         self.creates = SlidingWindow()
+        self.reads = SlidingWindow()
         self._lock = threading.Lock()
         self._last_sweep = clock()
 
@@ -62,7 +63,7 @@ class RateLimiter:
         with self._lock:
             now = self.clock()
             if now - self._last_sweep >= WINDOW_SECONDS:
-                for window in (self.requests, self.writes, self.creates):
+                for window in (self.requests, self.writes, self.creates, self.reads):
                     window.sweep(now)
                 self._last_sweep = now
             wait = max((window.retry_after(key, limit, now) for window, limit in rules), default=0)

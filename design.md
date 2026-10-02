@@ -228,7 +228,7 @@ pointless: the next member who syncs sees a new epoch and re-pushes the log.
 
 Every number is configuration with a default. Both references read the same
 `EVEN_*` names. In the Worker, values come from `wrangler.jsonc` `vars` (and
-the two rate limiters are bindings whose thresholds are declared alongside);
+the four rate limiters are bindings whose thresholds are declared alongside);
 in Python they are environment variables. The `limits` table is seeded from
 them at deploy or start.
 
@@ -243,6 +243,7 @@ them at deploy or start.
 | `EVEN_RATE_REQUESTS_PER_MINUTE` | `120` | Per IP, all endpoints |
 | `EVEN_RATE_WRITES_PER_MINUTE` | `60` | Per IP, append. A whole group behind one NAT shares this, and everyone re-pushes at once after an epoch change, hence not lower |
 | `EVEN_RATE_GROUP_CREATES_PER_MINUTE` | `3` | Per IP, first write to a new group |
+| `EVEN_RATE_READS_PER_MINUTE` | `120` (public server: `5`) | Per IP, event reads (`GET …/events`). The default changes nothing beyond the request limit; the public server sets it for D1's daily rows-read quota, since a full page reads about 514 rows |
 | `EVEN_DAILY_WRITE_BUDGET` | `0` (public server: `7400`) | Append, global: events stored per UTC day, duplicates not counted |
 | `EVEN_TRUST_PROXY_HEADER` | unset | Python: `CF-Connecting-IP` or `X-Forwarded-For` |
 | `EVEN_OPERATOR` | unset | `/v1/info` |
@@ -262,12 +263,12 @@ cron users.
 ## Rate limiting
 
 - **Worker:** the Workers Rate Limiting binding supports 10- and 60-second
-  periods only, which is why every rate is expressed per minute. Three
+  periods only, which is why every rate is expressed per minute. Four
   limiters, keyed by client IP (`CF-Connecting-IP`, IPv6 truncated to /64):
-  requests, writes, creations. Falls back to allow if a binding is missing so a
-  self-deployed Worker without them still works. The limits are approximate
-  and per-location; that is fine for abuse control.
-- **Python:** an in-memory sliding window per key, same three limits. Behind
+  requests, writes, creations, and event reads. Falls back to allow if a
+  binding is missing so a self-deployed Worker without them still works. The
+  limits are approximate and per-location; that is fine for abuse control.
+- **Python:** an in-memory sliding window per key, same four limits. Behind
   Caddy, nginx, or a Cloudflare Tunnel every client shares one IP unless
   `EVEN_TRUST_PROXY_HEADER` names the header to read; the README says so
   loudly.
@@ -299,7 +300,7 @@ group ids, no IPs.
   against `URL.pathname`; a router would be the largest dependency in the
   project. Unknown route → `404 not_found`; known route, wrong method →
   `405 method_not_allowed`.
-- `wrangler.jsonc` declares: the D1 binding, three rate limiters, the cron
+- `wrangler.jsonc` declares: the D1 binding, four rate limiters, the cron
   trigger, `vars` for every `EVEN_*` value, `compatibility_date`, and
   observability with invocation logs disabled.
 - `schema.sql` (tables and triggers) is applied with `wrangler d1 execute`, and

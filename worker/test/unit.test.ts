@@ -220,6 +220,7 @@ describe('limits', () => {
           requests_per_minute: 100000,
           writes_per_minute: 100000,
           group_creates_per_minute: 100000,
+          reads_per_minute: 100000,
         },
       },
       retention_days: 365,

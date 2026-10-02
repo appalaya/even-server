@@ -39,7 +39,8 @@
   "ratelimits": [
     { "name": "RATE_REQUESTS", "namespace_id": "4101", "simple": { "limit": 120, "period": 60 } },
     { "name": "RATE_WRITES", "namespace_id": "4102", "simple": { "limit": 60, "period": 60 } },
-    { "name": "RATE_CREATES", "namespace_id": "4103", "simple": { "limit": 3, "period": 60 } }
+    { "name": "RATE_CREATES", "namespace_id": "4103", "simple": { "limit": 3, "period": 60 } },
+    { "name": "RATE_READS", "namespace_id": "4104", "simple": { "limit": 5, "period": 60 } }
   ],
 
   // Idle-group expiry (design.md, "Expiry"), once a day.
@@ -55,6 +56,10 @@
     "EVEN_RATE_REQUESTS_PER_MINUTE": "120",
     "EVEN_RATE_WRITES_PER_MINUTE": "60",
     "EVEN_RATE_GROUP_CREATES_PER_MINUTE": "3",
+    // Event reads (GET …/events) per minute per address (design.md default 120; the public server sets 5). A full
+    // page reads 514 D1 rows, so a day at 5 a minute is 3,700,800 of the Free plan's 5 million rows read a day
+    // (README.md, "Event reads per address").
+    "EVEN_RATE_READS_PER_MINUTE": "5",
     // Events stored per UTC day, all groups, duplicates not counted (design.md default 0 = none; the public server
     // sets one). One stored event writes at most 7 D1 rows (a one-event append to a new group), so 7,400 a day is at
     // most 51,801 of the Free plan's 100,000 rows written a day (README.md, "The daily write budget").
@@ -75,7 +80,8 @@
       "ratelimits": [
         { "name": "RATE_REQUESTS", "namespace_id": "4901", "simple": { "limit": 100000, "period": 60 } },
         { "name": "RATE_WRITES", "namespace_id": "4902", "simple": { "limit": 100000, "period": 60 } },
-        { "name": "RATE_CREATES", "namespace_id": "4903", "simple": { "limit": 100000, "period": 60 } }
+        { "name": "RATE_CREATES", "namespace_id": "4903", "simple": { "limit": 100000, "period": 60 } },
+        { "name": "RATE_READS", "namespace_id": "4904", "simple": { "limit": 100000, "period": 60 } }
       ],
       "vars": {
         "EVEN_MAX_EVENT_BYTES": "8192",
@@ -87,6 +93,7 @@
         "EVEN_RATE_REQUESTS_PER_MINUTE": "100000",
         "EVEN_RATE_WRITES_PER_MINUTE": "100000",
         "EVEN_RATE_GROUP_CREATES_PER_MINUTE": "100000",
+        "EVEN_RATE_READS_PER_MINUTE": "100000",
         "EVEN_DAILY_WRITE_BUDGET": "0",
         "EVEN_OPERATOR": "",
         "EVEN_TERMS_URL": ""

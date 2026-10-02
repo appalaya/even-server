@@ -17,11 +17,14 @@ export const RECOMMENDED_TEST_ENV = [
   'EVEN_RATE_REQUESTS_PER_MINUTE=100000',
   'EVEN_RATE_WRITES_PER_MINUTE=100000',
   'EVEN_RATE_GROUP_CREATES_PER_MINUTE=100000',
+  'EVEN_RATE_READS_PER_MINUTE=100000',
   'EVEN_DAILY_WRITE_BUDGET=0',
 ] as const;
 
 export const LIMIT_NAMES = ['max_event_bytes', 'max_group_bytes', 'max_group_events', 'max_batch', 'max_page', 'daily_write_budget'] as const;
 export const RATE_NAMES = ['requests_per_minute', 'writes_per_minute', 'group_creates_per_minute'] as const;
+/** Rates a server publishes only if it enforces them (§6.1); when present they must be counts like the others. */
+export const OPTIONAL_RATE_NAMES = ['reads_per_minute'] as const;
 /** Limits that bound something and so must be at least 1 (daily_write_budget and the rates may be 0). */
 const POSITIVE_LIMITS = new Set<string>(['max_event_bytes', 'max_group_bytes', 'max_group_events', 'max_batch', 'max_page']);
 
@@ -60,6 +63,11 @@ export function infoProblems(body: unknown): string[] {
     } else {
       for (const name of RATE_NAMES) {
         if (!isCount(rate[name])) problems.push(`"limits.rate.${name}" must be a non-negative integer, got ${JSON.stringify(rate[name])}`);
+      }
+      for (const name of OPTIONAL_RATE_NAMES) {
+        if (rate[name] !== undefined && !isCount(rate[name])) {
+          problems.push(`"limits.rate.${name}" is optional but must be a non-negative integer when present, got ${JSON.stringify(rate[name])}`);
+        }
       }
     }
   }
@@ -104,6 +112,9 @@ export function configWarnings(limits: Limits): string[] {
   if (rate.writes_per_minute > 0 && rate.writes_per_minute < 2000) low.push(`writes_per_minute=${rate.writes_per_minute}`);
   if (rate.group_creates_per_minute > 0 && rate.group_creates_per_minute < 1000) {
     low.push(`group_creates_per_minute=${rate.group_creates_per_minute}`);
+  }
+  if (rate.reads_per_minute !== undefined && rate.reads_per_minute > 0 && rate.reads_per_minute < 5000) {
+    low.push(`reads_per_minute=${rate.reads_per_minute}`);
   }
   if (low.length > 0) {
     warnings.push(
