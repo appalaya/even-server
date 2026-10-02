@@ -108,21 +108,70 @@ def test_daily_write_budget(make_client):
         assert db.execute("SELECT writes FROM counters").fetchone() == (2,)
 
 
-def test_budget_trigger_refuses_the_increment_and_fails_closed_without_its_row(client):
-    bump = ("INSERT INTO counters (day, writes) VALUES ('1999-12-31', 1)"
-            " ON CONFLICT (day) DO UPDATE SET writes = writes + 1")
+def test_daily_write_budget_counts_events_not_appends(make_client):
+    client = make_client(EVEN_DAILY_WRITE_BUDGET=4)
+    group = new_group()
+    a, b, c = envelope(), envelope(), envelope()
+
+    def push(*envelopes):
+        return client.post(group.events, json=batch(*envelopes), headers=group.headers)
+
+    def counted():
+        with sqlite3.connect(client.app.state.store.path) as db:
+            return db.execute("SELECT COALESCE(SUM(writes), 0) FROM counters").fetchone()[0]
+
+    # Two new events (the repeat of `a` is one event): the count goes up by 2, not 1.
+    assert push(a, b, a).json() | {"epoch": None} == {"accepted": 2, "duplicates": 1, "seq": 2, "epoch": None}
+    assert counted() == 2
+    # Three new events would pass the budget by one: refused whole, nothing stored or counted.
+    assert push(c, envelope(), envelope()).status_code == 503
+    assert counted() == 2
+    assert client.get(group.events, headers=group.headers).json()["next"] == 2
+    # A duplicate alongside new events counts only the new ones; this fills the day exactly.
+    assert push(a, c, envelope()).json()["accepted"] == 2
+    assert counted() == 4
+    # On a spent day an append of duplicates only still succeeds and writes no counter row.
+    with sqlite3.connect(client.app.state.store.path) as db:
+        rows_before = db.execute("SELECT COUNT(*) FROM counters").fetchone()
+    assert push(a, b, c).json() | {"epoch": None} == {"accepted": 0, "duplicates": 3, "seq": 4, "epoch": None}
+    assert counted() == 4
+    with sqlite3.connect(client.app.state.store.path) as db:
+        assert db.execute("SELECT COUNT(*) FROM counters").fetchone() == rows_before
+    assert push(envelope()).status_code == 503
+
+
+def test_the_first_counted_append_of_a_day_is_checked_too(make_client):
+    client = make_client(EVEN_DAILY_WRITE_BUDGET=2)
+    group = new_group()
+    response = client.post(group.events, json=batch(envelope(), envelope(), envelope()), headers=group.headers)
+    assert response.status_code == 503 and response.json()["error"] == "over_budget"
+    with sqlite3.connect(client.app.state.store.path) as db:
+        assert db.execute("SELECT COUNT(*) FROM counters").fetchone() == (0,)
+    assert client.post(group.events, json=batch(envelope(), envelope()), headers=group.headers).status_code == 200
+
+
+def test_budget_triggers_refuse_a_count_past_it_and_fail_closed_without_its_row(client):
+    def add(n):
+        db.execute("INSERT INTO counters (day, writes) VALUES ('1999-12-31', ?)"
+                   " ON CONFLICT (day) DO UPDATE SET writes = writes + excluded.writes", (n,))
+
     db = sqlite3.connect(client.app.state.store.path, autocommit=True)
     try:
-        db.execute("UPDATE limits SET value = 2 WHERE key = 'daily_write_budget'")
-        db.execute(bump)
-        db.execute(bump)
+        db.execute("UPDATE limits SET value = 5 WHERE key = 'daily_write_budget'")
         with pytest.raises(sqlite3.IntegrityError, match="over_budget"):
-            db.execute(bump)
+            add(6)  # the day's first row, already past the budget
+        add(3)
+        add(2)  # exactly the budget
+        with pytest.raises(sqlite3.IntegrityError, match="over_budget"):
+            add(1)
         db.execute("UPDATE limits SET value = 0 WHERE key = 'daily_write_budget'")
-        db.execute(bump)  # 0 means no budget
+        add(100)  # 0 means no budget
         db.execute("DELETE FROM limits WHERE key = 'daily_write_budget'")
         with pytest.raises(sqlite3.IntegrityError, match="over_budget"):
-            db.execute(bump)
+            add(1)
+        db.execute("DELETE FROM counters")
+        with pytest.raises(sqlite3.IntegrityError, match="over_budget"):
+            add(1)
     finally:
         db.close()
 
@@ -149,12 +198,13 @@ def test_daily_write_budget_is_exact_under_concurrency(make_client):
         assert db.execute("SELECT COUNT(*) FROM groups").fetchone() == (3,)
 
 
-def test_writes_are_counted_even_without_a_budget(client):
+def test_events_are_counted_even_without_a_budget(client):
     group = new_group()
-    client.post(group.events, json=batch(envelope()), headers=group.headers)
-    client.post(group.events, json=batch(envelope()), headers=group.headers)
+    first = envelope()
+    client.post(group.events, json=batch(first), headers=group.headers)
+    client.post(group.events, json=batch(first, envelope(), envelope()), headers=group.headers)
     with sqlite3.connect(client.app.state.store.path) as db:
-        assert db.execute("SELECT writes FROM counters").fetchone() == (2,)
+        assert db.execute("SELECT writes FROM counters").fetchone() == (3,)
 
 
 def test_expiry_deletes_only_idle_groups(make_client, monkeypatch, capsys):

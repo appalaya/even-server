@@ -53,7 +53,7 @@ def test_every_response_is_no_store_and_every_error_is_protocol_shaped(make_clie
     first = envelope()
     responses = [
         client.get("/v1/info"),                                                           # 200
-        client.post(group.events, json=batch(first), headers=group.headers),             # 200, budget 1
+        client.post(group.events, json=batch(first), headers=group.headers),             # 200, 1 event counted
         client.get(group.events, headers=group.headers),                                  # 200
         client.post(group.events, json=batch(envelope()), headers=group.headers),       # 413
         client.post(group.events, json=batch({}), headers=group.headers),               # 400 envelope
@@ -64,8 +64,8 @@ def test_every_response_is_no_store_and_every_error_is_protocol_shaped(make_clie
         client.get("/nope"),                                                              # 404
         client.post("/v1/info"),                                                          # 405
         client.put(group.subscriptions, headers=group.headers),                           # 501
-        client.post(group.events, json=batch(first), headers=group.headers),             # 200, budget 2
-        client.post(group.events, json=batch(first), headers=group.headers),             # 503
+        client.post(group.events, json=batch(first), headers=group.headers),             # 200, a duplicate: 0 counted
+        client.post(group.events, json=batch(envelope(), envelope()), headers=group.headers),  # 503: 1 + 2 > 2
         client.delete(group.path, headers=group.headers),                                 # 204
     ]
     client.app.state.store.block(group.id, 0)

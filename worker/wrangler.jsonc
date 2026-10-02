@@ -55,10 +55,10 @@
     "EVEN_RATE_REQUESTS_PER_MINUTE": "120",
     "EVEN_RATE_WRITES_PER_MINUTE": "60",
     "EVEN_RATE_GROUP_CREATES_PER_MINUTE": "3",
-    // Append requests per UTC day, all groups (design.md default 0 = none; the public server sets one). One append
-    // writes at most 104 D1 rows, so 500 a day is at most 52,000 of the Free plan's 100,000 rows written a day
-    // (README.md, "The daily write budget").
-    "EVEN_DAILY_WRITE_BUDGET": "500",
+    // Events stored per UTC day, all groups, duplicates not counted (design.md default 0 = none; the public server
+    // sets one). One stored event writes at most 7 D1 rows (a one-event append to a new group), so 7,400 a day is at
+    // most 51,801 of the Free plan's 100,000 rows written a day (README.md, "The daily write budget").
+    "EVEN_DAILY_WRITE_BUDGET": "7400",
     // Optional strings shown to users in /v1/info; empty means unset.
     "EVEN_OPERATOR": "",
     "EVEN_TERMS_URL": ""
