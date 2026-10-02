@@ -11,7 +11,7 @@ import math
 import threading
 import time
 from collections import deque
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Sequence
 
 WINDOW_SECONDS = 60.0
 
@@ -88,18 +88,21 @@ def ip_key(address: str) -> str:
     return str(ip)
 
 
-def client_address(peer: str | None, headers: Mapping[str, str], trusted_header: str | None) -> str:
-    """The client's address: from the configured proxy header when present and
-    parseable, else the socket peer. For X-Forwarded-For the right-most entry is
-    used, which is the one the nearest (trusted) proxy appended; entries to its
-    left are client-supplied and forgeable."""
-    if trusted_header:
-        raw = headers.get(trusted_header)
-        if raw:
-            candidate = raw.rsplit(",", 1)[-1].strip()
-            try:
-                ipaddress.ip_address(candidate)
-                return candidate
-            except ValueError:
-                pass
+def client_address(peer: str | None, header_lines: Sequence[str]) -> str:
+    """The client's address: the right-most entry of the trusted proxy header,
+    read across every line of it in order, when that parses as an address;
+    else the socket peer.
+
+    One proxy is trusted: the one in front of this server, which adds the
+    address it saw last, either at the end of the list or as a line of its
+    own. Everything to its left, earlier lines included, came from the client
+    and is forgeable. (Reading only the first line would let a client choose
+    its own rate-limit key behind a proxy that appends a separate line.)"""
+    entries = [entry.strip() for line in header_lines for entry in line.split(",")]
+    if entries:
+        try:
+            ipaddress.ip_address(entries[-1])
+            return entries[-1]
+        except ValueError:
+            pass
     return peer or "unknown"

@@ -1,12 +1,15 @@
 """SQLite storage (design.md, "Storage model"). Caps and group accounting are
 enforced by the triggers in schema.sql; nothing here sums bytes.
 
-Every operation opens its own short-lived connection, so the store is safe to
-call from any thread. Writes run under `BEGIN IMMEDIATE`, which takes SQLite's
-write lock before the first `MAX(seq)` read, so two appends to one group never
-interleave. An in-process lock queues writers from this process fairly instead
-of leaving them to SQLite's busy-wait; the SQLite lock still covers other
-processes (for example `even-server block` run from a shell).
+A store holds one SQLite connection for the life of the process, so the
+database is not reopened (and its WAL checkpointed on close) for every request.
+A lock serialises every use of it, so the store is safe to call from any
+thread; each operation is a few milliseconds, and expiry runs in small
+transactions so that requests interleave with it. Writes run under
+`BEGIN IMMEDIATE`, which takes SQLite's write lock before the first `MAX(seq)`
+read, so two appends to one group never interleave; SQLite's lock (with a
+30-second busy timeout) still covers other processes, for example
+`even-server block` run from a shell.
 """
 
 import json
@@ -44,6 +47,21 @@ INSERT INTO counters (day, writes)
 """
 
 
+# Expiry batches (design.md, "Expiry"), as in the Worker. One batch's groups:
+# ?1 cutoff, ?2 groups, ?3 events. Through the groups_last_write_at index,
+# oldest first; a group is kept while the events of the groups before it are
+# fewer than ?3. The same text in both DELETEs of a batch selects the same groups.
+EXPIRY_GROUPS_PER_BATCH = 100
+EXPIRY_EVENTS_PER_BATCH = 1_000
+EXPIRED_BATCH = """
+SELECT id FROM (
+  SELECT id, SUM(events) OVER (ORDER BY last_write_at, r ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING) AS before
+    FROM (SELECT rowid AS r, id, events, last_write_at FROM groups
+           WHERE last_write_at < ?1 ORDER BY last_write_at, rowid LIMIT ?2)
+) WHERE COALESCE(before, 0) < ?3
+"""
+
+
 class GroupFull(Exception):
     def __init__(self, reason: str) -> None:
         super().__init__(reason)
@@ -78,25 +96,34 @@ class Page:
 class Store:
     def __init__(self, path: str) -> None:
         self.path = path
-        self._write_lock = threading.Lock()
+        self._lock = threading.RLock()
+        self._conn = sqlite3.connect(path, timeout=30.0, autocommit=True, check_same_thread=False)
+        # FULL, not NORMAL: an acknowledged write that vanished after a power
+        # cut would never be re-pushed, because the epoch would not change.
+        self._conn.execute("PRAGMA synchronous = FULL")
+
+    def close(self) -> None:
+        with self._lock:
+            self._conn.close()
+
+    def __enter__(self) -> Store:
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.close()
 
     # -- plumbing ---------------------------------------------------------
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
-        conn = sqlite3.connect(self.path, timeout=30.0, autocommit=True)
-        try:
-            # FULL, not NORMAL: an acknowledged write that vanished after a power
-            # cut would never be re-pushed, because the epoch would not change.
-            conn.execute("PRAGMA synchronous = FULL")
-            yield conn
-        finally:
-            conn.close()
+        """The connection, held for the duration of the block."""
+        with self._lock:
+            yield self._conn
 
     @contextmanager
     def _write(self) -> Iterator[sqlite3.Connection]:
-        """A connection inside `BEGIN IMMEDIATE`; commits on success, rolls back on error."""
-        with self._write_lock, self._connect() as conn:
+        """The connection inside `BEGIN IMMEDIATE`; commits on success, rolls back on error."""
+        with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             try:
                 yield conn
@@ -108,7 +135,7 @@ class Store:
 
     @contextmanager
     def _snapshot(self) -> Iterator[sqlite3.Connection]:
-        """A connection inside a read transaction: one consistent snapshot."""
+        """The connection inside a read transaction: one consistent snapshot."""
         with self._connect() as conn:
             conn.execute("BEGIN")
             try:
@@ -234,14 +261,31 @@ class Store:
         with self._write() as conn:
             return conn.execute("DELETE FROM blocked WHERE group_id = ?", (group_id,)).rowcount == 1
 
-    def expire(self, cutoff_ms: int, *, counters_before: str) -> int:
+    def expire(
+        self,
+        cutoff_ms: int,
+        *,
+        counters_before: str,
+        groups_per_batch: int = EXPIRY_GROUPS_PER_BATCH,
+        events_per_batch: int = EXPIRY_EVENTS_PER_BATCH,
+    ) -> int:
         """Delete groups (and their events) with no write since `cutoff_ms`, and
-        daily counters older than `counters_before`. Returns groups deleted."""
+        daily counters older than `counters_before`. Returns groups deleted.
+
+        Whole groups only, each batch in its own transaction, so that requests
+        run between batches and no group is ever left alive with part of its
+        log under the same epoch. A batch is at most `groups_per_batch` groups,
+        oldest first, taken while the events before them are fewer than
+        `events_per_batch` (the first always goes). Runs until none is left."""
+        deleted = 0
+        args = (cutoff_ms, groups_per_batch, events_per_batch)
+        while True:
+            with self._write() as conn:
+                conn.execute(f"DELETE FROM events WHERE group_id IN ({EXPIRED_BATCH})", args)
+                batch = conn.execute(f"DELETE FROM groups WHERE id IN ({EXPIRED_BATCH})", args).rowcount
+            deleted += batch
+            if batch == 0:
+                break
         with self._write() as conn:
-            conn.execute(
-                "DELETE FROM events WHERE group_id IN (SELECT id FROM groups WHERE last_write_at < ?)",
-                (cutoff_ms,),
-            )
-            deleted = conn.execute("DELETE FROM groups WHERE last_write_at < ?", (cutoff_ms,)).rowcount
             conn.execute("DELETE FROM counters WHERE day < ?", (counters_before,))
         return deleted

@@ -250,7 +250,7 @@ them at deploy or start.
 | `EVEN_RATE_WRITES_PER_MINUTE` | `60` | Per IP, append. A whole group behind one NAT shares this, and everyone re-pushes at once after an epoch change, hence not lower |
 | `EVEN_RATE_GROUP_CREATES_PER_MINUTE` | `3` | Per IP, first write to a new group |
 | `EVEN_RATE_READS_PER_MINUTE` | `120` (public server: `5`) | Per IP, event reads (`GET …/events`). The default changes nothing beyond the request limit; the public server sets it for D1's daily rows-read quota, since a full page reads about 514 rows |
-| `EVEN_DAILY_WRITE_BUDGET` | `0` (public server: `6500`) | Append, global: events stored per UTC day, duplicates not counted |
+| `EVEN_DAILY_WRITE_BUDGET` | `6500` | Append, global: events stored per UTC day, duplicates not counted |
 | `EVEN_TRUST_PROXY_HEADER` | unset | Python: `CF-Connecting-IP` or `X-Forwarded-For` |
 | `EVEN_OPERATOR` | unset | `/v1/info` |
 | `EVEN_TERMS_URL` | unset | `/v1/info` |
@@ -288,7 +288,9 @@ SELECT id FROM (
 
 A run repeats batches until none is left, or it has written 10,000 D1 rows
 (`meta.rows_written`), or 20 batches; the next day's run carries on. The log
-line says whether the run was `complete`.
+line says whether the run was `complete`. The Python reference uses the same
+batches, each its own transaction so requests interleave, and runs until none
+is left (it has no daily row quota).
 
 ## Rate limiting
 
@@ -301,7 +303,8 @@ line says whether the run was `complete`.
 - **Python:** an in-memory sliding window per key, same four limits. Behind
   Caddy, nginx, or a Cloudflare Tunnel every client shares one IP unless
   `EVEN_TRUST_PROXY_HEADER` names the header to read; the README says so
-  loudly.
+  loudly. Every line of that header is read and the right-most address wins,
+  the one the single trusted proxy added.
 
 Rate-limit state is the only per-IP data either server keeps, and it lives in
 memory or in the platform's limiter, never in the database.
@@ -322,7 +325,9 @@ group ids, no IPs.
   anything from uvicorn or another library is written as its format string,
   never with its arguments, and scrubbed of paths, ids and addresses.
   Tracebacks are never written. The README states that Caddy's `log`
-  directive records full URIs and shows how to disable or redact it.
+  directive records full URIs and shows how to disable or redact it, and its
+  `Caddyfile.example` handles errors itself (`handle_errors`), so that Caddy's
+  own error lines, which carry the URI and client address, stay at DEBUG.
 
 ## The Worker (`worker/`)
 
@@ -345,7 +350,8 @@ group ids, no IPs.
 
 ## The Python reference (`python/`)
 
-- FastAPI + `sqlite3` from the standard library, a small package.
+- FastAPI + `sqlite3` from the standard library, a small package. One SQLite
+  connection per process, shared under a lock.
 - **Python 3.14 or newer is required** (`requires-python = ">=3.14"` in
   `pyproject.toml`); developed in a venv with pinned `requirements.txt`.
 - `Dockerfile` and a `docker-compose.yml` that mounts a volume for the database.

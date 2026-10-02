@@ -232,6 +232,70 @@ def test_expiry_deletes_only_idle_groups(make_client, monkeypatch, capsys):
     assert "expired 1" in capsys.readouterr().out
 
 
+def test_expiry_deletes_whole_groups_in_small_transactions(make_client):
+    client = make_client(EVEN_RETENTION_DAYS=30, EVEN_MAX_GROUP_EVENTS=200)
+    store = client.app.state.store
+    now = time.time_ns() // 1_000_000
+    sizes = [3, 30, 1, 1, 50, 2]
+    idle = [new_group() for _ in sizes]
+    for i, (group, size) in enumerate(zip(idle, sizes)):
+        for start in range(0, size, 25):
+            envelopes = [envelope(size=17) for _ in range(min(25, size - start))]
+            assert client.post(group.events, json=batch(*envelopes), headers=group.headers).status_code == 200
+        with sqlite3.connect(store.path) as db:
+            db.execute("UPDATE groups SET last_write_at = ? WHERE id = ?", (now - 31 * DAY_MS + i, group.id))
+    active = new_group()
+    client.post(active.events, json=batch(envelope()), headers=active.headers)
+
+    statements: list[str] = []
+    store._conn.set_trace_callback(statements.append)
+    try:
+        deleted = store.expire(now - 30 * DAY_MS, counters_before="2000-01-01", groups_per_batch=2, events_per_batch=10)
+    finally:
+        store._conn.set_trace_callback(None)
+    assert deleted == 6
+    # Oldest first: {3, 30}, {1, 1}, {50} (alone, over the event bound), {2}, then an empty batch; plus the counters.
+    assert statements.count("BEGIN IMMEDIATE") == 6
+    for group in idle:
+        assert client.get(group.events, headers=group.headers).json()["epoch"] is None
+    with sqlite3.connect(store.path) as db:
+        assert db.execute("SELECT COUNT(*) FROM events").fetchone() == (1,)
+    assert len(read_all(client, active)) == 1
+
+
+def test_expiry_reads_idle_groups_through_the_last_write_at_index(client):
+    with sqlite3.connect(client.app.state.store.path) as db:
+        plan = " ".join(row[3] for row in db.execute(
+            "EXPLAIN QUERY PLAN SELECT id FROM groups WHERE last_write_at < ? ORDER BY last_write_at, rowid LIMIT ?",
+            (0, 100)))
+    assert "groups_last_write_at" in plan and "TEMP B-TREE" not in plan
+
+
+def test_last_write_at_moves_once_per_append_and_never_backwards(make_client):
+    client = make_client()
+    store = client.app.state.store
+    group = new_group()
+    e = envelope()
+    stored = lambda: Envelope(id=e["id"], v=1, n=e["n"], c=e["c"], size=320)  # noqa: E731
+    store.append(group.id, [stored()], epoch="E" * 22, now_ms=2_000, day="2030-01-01")
+    e = envelope()
+    store.append(group.id, [stored()], epoch="E" * 22, now_ms=1_000, day="2030-01-01")
+    with sqlite3.connect(store.path) as db:
+        assert db.execute("SELECT last_write_at, events FROM groups").fetchone() == (2_000, 2)
+
+
+def test_one_connection_for_the_life_of_the_store(client, monkeypatch):
+    opened = []
+    real_connect = sqlite3.connect
+    monkeypatch.setattr(sqlite3, "connect", lambda *a, **k: opened.append(a) or real_connect(*a, **k))
+    group = new_group()
+    for _ in range(3):
+        client.post(group.events, json=batch(envelope()), headers=group.headers)
+        client.get(group.events, headers=group.headers)
+    client.get("/v1/info")
+    assert opened == []
+
+
 @pytest.mark.parametrize("argv", [["expire-now"], ["--expire-now"]])
 def test_expire_now_on_a_fresh_database(tmp_path, monkeypatch, argv, capsys):
     monkeypatch.setenv("EVEN_DB_PATH", str(tmp_path / "fresh.db"))

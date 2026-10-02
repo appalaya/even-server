@@ -11,7 +11,7 @@ def test_defaults_match_the_design_table():
     config = Config.from_env({})
     assert config.limits == Limits(
         max_event_bytes=8192, max_group_bytes=2097152, max_group_events=10000, max_batch=25, max_page=500,
-        daily_write_budget=0, requests_per_minute=120, writes_per_minute=60, group_creates_per_minute=3,
+        daily_write_budget=6500, requests_per_minute=120, writes_per_minute=60, group_creates_per_minute=3,
         reads_per_minute=120, retention_days=365,
     )
     assert (config.db_path, config.host, config.port) == ("./even.db", "127.0.0.1", 8787)

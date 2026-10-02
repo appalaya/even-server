@@ -28,7 +28,8 @@ export const LIMIT_VARIABLES = [
     minimum: 1,
   },
   { variable: 'EVEN_RATE_READS_PER_MINUTE', key: 'reads_per_minute', fallback: 120, minimum: 1 },
-  { variable: 'EVEN_DAILY_WRITE_BUDGET', key: 'daily_write_budget', fallback: 0, minimum: 0 }, // 0 = no budget
+  // Events stored per UTC day, all groups; 0 = no budget. README.md, "The daily write budget".
+  { variable: 'EVEN_DAILY_WRITE_BUDGET', key: 'daily_write_budget', fallback: 6500, minimum: 0 },
 ] as const;
 
 export type LimitKey = (typeof LIMIT_VARIABLES)[number]['key'];
