@@ -448,6 +448,10 @@ server's terms (PROTOCOL.md §9):
 
 ## Alerts
 
+When an alert fires, or a report or a bad day arrives, follow the operations runbook, even-app
+[`docs/runbook.md`](https://github.com/appalaya/even-app/blob/main/docs/runbook.md). It has numbered steps for
+takedowns, budget days, 429 floods, D1 limits, redeploys and rollbacks.
+
 The deploy's API token cannot create notifications, so the account owner sets these up once, by hand. What the
 Free plan offers, per Cloudflare's [available notifications](https://developers.cloudflare.com/notifications/notification-available/)
 (checked 2026-10-01):
