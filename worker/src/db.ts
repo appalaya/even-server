@@ -16,6 +16,8 @@ export interface AppendResult {
   accepted: number;
   seq: number;
   epoch: string;
+  /** D1's `meta.rows_written` summed over the batch: what the daily write budget is sized against (README.md). */
+  rowsWritten: number;
 }
 
 export interface StoredEvent {
@@ -133,7 +135,13 @@ export async function append(
   const row = results[results.length - 1]?.results[0];
   if (row === undefined || typeof row.epoch !== 'string')
     throw new Error('group row missing after append');
-  return { accepted, seq: typeof row.seq === 'number' ? row.seq : 0, epoch: row.epoch };
+  const rowsWritten = results.reduce((sum, result) => sum + (result.meta.rows_written ?? 0), 0);
+  return {
+    accepted,
+    seq: typeof row.seq === 'number' ? row.seq : 0,
+    epoch: row.epoch,
+    rowsWritten,
+  };
 }
 
 /** True if a trigger's RAISE(ABORT, reason) is what failed the batch (D1 wraps it; the message keeps the reason). */
@@ -211,23 +219,87 @@ export async function deleteGroup(db: D1Database, groupId: string): Promise<void
   ]);
 }
 
+/** How much one expiry run may delete (design.md, "Expiry"). */
+export interface ExpiryBounds {
+  /** At most this many groups per batch. */
+  groupsPerBatch: number;
+  /**
+   * A batch takes groups, longest idle first, while the events of the groups before them are fewer than this. The
+   * first group always goes, so a batch holds at most this many events plus one group (at most max_group_events).
+   */
+  eventsPerBatch: number;
+  /** No new batch once the run's batches have written this many D1 rows (`meta.rows_written`). */
+  rowsPerRun: number;
+  /** At most this many batches of two statements, well inside D1's queries per invocation. */
+  batchesPerRun: number;
+}
+
+export const EXPIRY_BOUNDS: ExpiryBounds = {
+  groupsPerBatch: 100,
+  eventsPerBatch: 1_000,
+  rowsPerRun: 10_000,
+  batchesPerRun: 20,
+};
+
+export interface ExpiryResult {
+  groups: number;
+  rowsWritten: number;
+  /** False when the run stopped at a bound with idle groups still left for the next run. */
+  complete: boolean;
+}
+
 /**
- * Deletes groups (and their events) with no write since `cutoffMs`, and daily counters older than
- * `countersBefore`. Returns the number of groups deleted.
+ * One batch's groups: ?1 cutoff, ?2 groups, ?3 events. The inner query reads at most ?2 rows through the
+ * groups_last_write_at index, in (last_write_at, rowid) order, the index's own; the window then keeps a group while
+ * the events of the groups before it are fewer than ?3. The same text in both DELETEs selects the same groups, since
+ * deleting events changes no groups row and the batch is one transaction.
+ */
+const EXPIRED_BATCH = `SELECT id FROM (
+    SELECT id, SUM(events) OVER (ORDER BY last_write_at, r ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING) AS before
+      FROM (SELECT rowid AS r, id, events, last_write_at FROM groups
+             WHERE last_write_at < ?1 ORDER BY last_write_at, rowid LIMIT ?2)
+  ) WHERE COALESCE(before, 0) < ?3`;
+
+/**
+ * Deletes groups (with their events) that have had no write since `cutoffMs`, in batches that each delete whole
+ * groups atomically, so a group is never left alive with part of its log under the same epoch. Stops when none are
+ * left or at a bound in `bounds`; the next run carries on. Also deletes daily counters older than `countersBefore`.
  */
 export async function expire(
   db: D1Database,
   cutoffMs: number,
   countersBefore: string,
-): Promise<number> {
-  const [, groups] = await db.batch([
-    db
-      .prepare(
-        'DELETE FROM events WHERE group_id IN (SELECT id FROM groups WHERE last_write_at < ?)',
-      )
-      .bind(cutoffMs),
-    db.prepare('DELETE FROM groups WHERE last_write_at < ?').bind(cutoffMs),
-    db.prepare('DELETE FROM counters WHERE day < ?').bind(countersBefore),
-  ]);
-  return groups?.meta.changes ?? 0;
+  bounds: ExpiryBounds = EXPIRY_BOUNDS,
+): Promise<ExpiryResult> {
+  let groups = 0;
+  let rowsWritten = 0;
+  let complete = false;
+  for (let batch = 0; batch < bounds.batchesPerRun && rowsWritten < bounds.rowsPerRun; batch++) {
+    const events = Math.max(1, Math.min(bounds.eventsPerBatch, bounds.rowsPerRun - rowsWritten));
+    const [eventsDeleted, groupsDeleted] = await db.batch([
+      db
+        .prepare(`DELETE FROM events WHERE group_id IN (${EXPIRED_BATCH})`)
+        .bind(cutoffMs, bounds.groupsPerBatch, events),
+      db
+        .prepare(`DELETE FROM groups WHERE id IN (${EXPIRED_BATCH})`)
+        .bind(cutoffMs, bounds.groupsPerBatch, events),
+    ]);
+    const deleted = groupsDeleted?.meta.changes ?? 0;
+    groups += deleted;
+    rowsWritten +=
+      (eventsDeleted?.meta.rows_written ?? 0) + (groupsDeleted?.meta.rows_written ?? 0);
+    if (deleted === 0) {
+      complete = true;
+      break;
+    }
+  }
+  if (!complete) {
+    const left = await db
+      .prepare('SELECT 1 AS hit FROM groups WHERE last_write_at < ? LIMIT 1')
+      .bind(cutoffMs)
+      .first();
+    complete = left === null;
+  }
+  await db.prepare('DELETE FROM counters WHERE day < ?').bind(countersBefore).run();
+  return { groups, rowsWritten, complete };
 }

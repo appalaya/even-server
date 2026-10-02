@@ -1,5 +1,6 @@
--- Even sync server storage (design.md, "Storage model"): the same tables and triggers as the Python reference,
--- written idempotently so that `npm run db:schema` can be re-run safely.
+-- Even sync server storage (design.md, "Storage model"): the same tables, index and triggers as the Python reference,
+-- written idempotently so that `npm run db:schema` can be re-run safely: everything is CREATE … IF NOT EXISTS except
+-- events_count, which is dropped and created again so that its current definition always wins.
 --
 -- Apply with:  npx wrangler d1 execute even --local  --file schema.sql     (npm run db:schema)
 -- Production:  the deploy workflow runs the same with --remote on every deploy (README.md, "Deploying").
@@ -41,6 +42,9 @@ CREATE TABLE IF NOT EXISTS events (
   UNIQUE     (group_id, id)
 );
 
+-- Expiry takes idle groups oldest first, a bounded batch at a time (design.md, "Expiry").
+CREATE INDEX IF NOT EXISTS groups_last_write_at ON groups (last_write_at);
+
 -- Caps and counters live in SQL so that a batch of statements is atomic
 -- without an interactive transaction (D1 has none).
 -- BEFORE INSERT triggers fire before the uniqueness check, so a duplicate
@@ -58,11 +62,17 @@ BEGIN
   SELECT RAISE(ABORT, 'group_full');
 END;
 
-CREATE TRIGGER IF NOT EXISTS events_count AFTER INSERT ON events
+-- last_write_at is indexed (groups_last_write_at, below), and an UPDATE that assigns an indexed column rewrites its
+-- index entry even when the value does not change, which on D1 is a row written. So the counts are updated per event
+-- and last_write_at only when it moves: once per append to an existing group, never for a group created by the
+-- append (its row is inserted with it). It never moves backwards. Replaced on every run (DROP, then CREATE) so that a
+-- database created with an earlier definition gets this one; that leaves data alone.
+DROP TRIGGER IF EXISTS events_count;
+CREATE TRIGGER events_count AFTER INSERT ON events
 BEGIN
-  UPDATE groups SET bytes = bytes + NEW.size, events = events + 1,
-                    last_write_at = NEW.created_at
-   WHERE id = NEW.group_id;
+  UPDATE groups SET bytes = bytes + NEW.size, events = events + 1 WHERE id = NEW.group_id;
+  UPDATE groups SET last_write_at = NEW.created_at
+   WHERE id = NEW.group_id AND last_write_at < NEW.created_at;
 END;
 
 -- The daily write budget counts events stored, duplicates not counted. The append batch adds the number of its

@@ -126,7 +126,8 @@ jobs:
           git diff -- wrangler.jsonc
 
       - name: Apply schema.sql
-        # Every statement is CREATE ... IF NOT EXISTS: it adds what is missing and leaves data alone.
+        # Safe on every run and leaves data alone: CREATE ... IF NOT EXISTS adds what is missing (a new table, index or
+        # trigger), and the one trigger whose definition changed (events_count) is dropped and created again.
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
