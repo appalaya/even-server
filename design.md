@@ -77,12 +77,18 @@ BEGIN
   SELECT RAISE(ABORT, 'group_full');
 END;
 
+-- Two updates, not one: last_write_at is indexed (below), and assigning an
+-- indexed column rewrites its index entry, a D1 row written, even when the
+-- value does not change. So last_write_at moves once per append to an
+-- existing group (never for a group the append creates), and never backwards.
 CREATE TRIGGER events_count AFTER INSERT ON events
 BEGIN
-  UPDATE groups SET bytes = bytes + NEW.size, events = events + 1,
-                    last_write_at = NEW.created_at
-   WHERE id = NEW.group_id;
+  UPDATE groups SET bytes = bytes + NEW.size, events = events + 1 WHERE id = NEW.group_id;
+  UPDATE groups SET last_write_at = NEW.created_at
+   WHERE id = NEW.group_id AND last_write_at < NEW.created_at;
 END;
+
+CREATE INDEX groups_last_write_at ON groups (last_write_at);   -- expiry, oldest first
 
 -- The daily write budget, in events stored, checked as the append batch adds
 -- its new events to the day's counter, so appends in flight at the boundary
@@ -244,7 +250,7 @@ them at deploy or start.
 | `EVEN_RATE_WRITES_PER_MINUTE` | `60` | Per IP, append. A whole group behind one NAT shares this, and everyone re-pushes at once after an epoch change, hence not lower |
 | `EVEN_RATE_GROUP_CREATES_PER_MINUTE` | `3` | Per IP, first write to a new group |
 | `EVEN_RATE_READS_PER_MINUTE` | `120` (public server: `5`) | Per IP, event reads (`GET …/events`). The default changes nothing beyond the request limit; the public server sets it for D1's daily rows-read quota, since a full page reads about 514 rows |
-| `EVEN_DAILY_WRITE_BUDGET` | `0` (public server: `7400`) | Append, global: events stored per UTC day, duplicates not counted |
+| `EVEN_DAILY_WRITE_BUDGET` | `0` (public server: `6500`) | Append, global: events stored per UTC day, duplicates not counted |
 | `EVEN_TRUST_PROXY_HEADER` | unset | Python: `CF-Connecting-IP` or `X-Forwarded-For` |
 | `EVEN_OPERATOR` | unset | `/v1/info` |
 | `EVEN_TERMS_URL` | unset | `/v1/info` |
@@ -259,6 +265,30 @@ A scheduled job, daily, deletes groups where `last_write_at < now − retention`
 and their events. In the Worker this is a Cron Trigger. In the Python reference
 it is a background thread with a 24-hour sleep, plus a `--expire-now` flag for
 cron users.
+
+Every group goes whole, its events and its row in one transaction: a group
+left alive with part of its log would keep its epoch, and a client syncing from
+0 would get a hole it cannot detect. Within that, the Worker's run is bounded,
+because one D1 transaction cannot delete millions of rows, and a batch that
+fails every day would never expire anything:
+
+```sql
+-- One batch's groups (?1 cutoff, ?2 = 100 groups, ?3 = 1,000 events): through
+-- the last_write_at index, oldest first, keeping a group while the events of
+-- the groups before it are fewer than ?3. The first group always goes, so a
+-- batch is at most 1,000 events plus one group (at most max_group_events).
+SELECT id FROM (
+  SELECT id, SUM(events) OVER (ORDER BY last_write_at, r
+                               ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING) AS before
+    FROM (SELECT rowid AS r, id, events, last_write_at FROM groups
+           WHERE last_write_at < ?1 ORDER BY last_write_at, rowid LIMIT ?2)
+) WHERE COALESCE(before, 0) < ?3;
+-- batch: DELETE FROM events WHERE group_id IN (…); DELETE FROM groups WHERE id IN (…)
+```
+
+A run repeats batches until none is left, or it has written 10,000 D1 rows
+(`meta.rows_written`), or 20 batches; the next day's run carries on. The log
+line says whether the run was `complete`.
 
 ## Rate limiting
 

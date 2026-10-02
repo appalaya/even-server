@@ -6,7 +6,9 @@
 import { createScheduledController } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import worker from '../src/index';
+import * as store from '../src/db';
+import { parseAppendBody } from '../src/envelope';
+import worker, { expireIdleGroups } from '../src/index';
 import {
   append,
   call,
@@ -704,5 +706,140 @@ describe('scheduled expiry', () => {
       await runCron(now);
       expect(await body(await read(group))).toMatchObject({ epoch: null });
     });
+  });
+
+  async function idleGroup(events: number, idleSinceMs: number): Promise<Group> {
+    const group = await freshGroup();
+    for (let i = 0; i < events; i += 25)
+      await append(
+        group,
+        Array.from({ length: Math.min(25, events - i) }, () => envelope({ cipherBytes: 17 })),
+      );
+    await env.DB.prepare('UPDATE groups SET last_write_at = ? WHERE id = ?')
+      .bind(idleSinceMs, group.groupId)
+      .run();
+    return group;
+  }
+
+  const storedEvents = async (group: Group): Promise<unknown> =>
+    env.DB.prepare('SELECT COUNT(*) AS n FROM events WHERE group_id = ?')
+      .bind(group.groupId)
+      .first('n');
+
+  it('deletes in bounded batches of whole groups, oldest first, and the next run carries on', async () => {
+    const now = Date.now();
+    await withLimits({ max_group_events: 200 }, async () => {
+      // Oldest first: 3, 30, 1, 1, 50, 2 events. Leftovers from other tests are older still; clear them first.
+      await expireIdleGroups(env, now);
+      const sizes = [3, 30, 1, 1, 50, 2];
+      const idle: Group[] = [];
+      for (const [i, size] of sizes.entries())
+        idle.push(await idleGroup(size, now - 400 * DAY + i));
+      const active = await idleGroup(5, now);
+
+      // Batches of at most 2 groups, taking a group while the events before it are fewer than 10: {3, 30} (3 events
+      // come before the 30), then {1, 1}; then batchesPerRun stops the run.
+      const first = await expireIdleGroups(env, now, {
+        groupsPerBatch: 2,
+        eventsPerBatch: 10,
+        rowsPerRun: 100_000,
+        batchesPerRun: 2,
+      });
+      expect(first).toMatchObject({ groups: 4, complete: false });
+      expect(await Promise.all(idle.map(storedEvents))).toEqual([0, 0, 0, 0, 50, 2]);
+      // The 50-event group is over the event bound, so its batch holds it alone, whole; then the run stops.
+      const second = await expireIdleGroups(env, now, {
+        groupsPerBatch: 5,
+        eventsPerBatch: 10,
+        rowsPerRun: 100_000,
+        batchesPerRun: 1,
+      });
+      expect(second).toMatchObject({ groups: 1, complete: false });
+      expect(await Promise.all(idle.map(storedEvents))).toEqual([0, 0, 0, 0, 0, 2]);
+      const third = await expireIdleGroups(env, now);
+      expect(third).toMatchObject({ groups: 1, complete: true });
+      for (const group of idle) expect((await body(await read(group))).epoch).toBeNull();
+      expect(await storedEvents(active)).toBe(5);
+      expect(lines.filter((line) => line.event === 'expiry').at(-1)).toMatchObject({
+        groups_deleted: 1,
+        complete: true,
+        retention_days: 365,
+      });
+    });
+  });
+
+  it('stops starting batches once a run has written rowsPerRun rows', async () => {
+    const now = Date.now();
+    await expireIdleGroups(env, now);
+    const idle = [await idleGroup(20, now - 400 * DAY), await idleGroup(20, now - 400 * DAY + 1)];
+    const run = await expireIdleGroups(env, now, {
+      groupsPerBatch: 1,
+      eventsPerBatch: 1_000,
+      rowsPerRun: 10,
+      batchesPerRun: 20,
+    });
+    expect(run).toMatchObject({ groups: 1, complete: false });
+    expect(run?.rowsWritten).toBeGreaterThanOrEqual(21); // the group's 20 events and its row, at least
+    expect(await Promise.all(idle.map(storedEvents))).toEqual([0, 20]);
+    expect(await expireIdleGroups(env, now)).toMatchObject({ groups: 1, complete: true });
+  });
+
+  it('finds idle groups through the last_write_at index, without reading the active ones', async () => {
+    const now = Date.now();
+    await expireIdleGroups(env, now);
+    for (let i = 0; i < 30; i++) await idleGroup(1, now);
+    await idleGroup(1, now - 400 * DAY);
+    const pick = await env.DB.prepare(
+      'SELECT id FROM groups WHERE last_write_at < ? ORDER BY last_write_at, rowid LIMIT ?',
+    )
+      .bind(now - 365 * DAY, 100)
+      .all();
+    expect(pick.results).toHaveLength(1);
+    expect(pick.meta.rows_read).toBeLessThan(5);
+    expect(await expireIdleGroups(env, now)).toMatchObject({ groups: 1, complete: true });
+  });
+});
+
+describe('D1 rows written by an append (the daily write budget is sized on these; README.md)', () => {
+  const limitsForAppend = { max_batch: 25, max_event_bytes: 8192 };
+  async function stored(
+    groupId: string,
+    events: ReturnType<typeof envelope>[],
+    day: string,
+    nowMs: number,
+  ): Promise<store.AppendResult> {
+    const parsed = parseAppendBody({ events }, limitsForAppend);
+    return store.append(env.DB, groupId, parsed, { epoch: 'E'.repeat(22), nowMs, day });
+  }
+
+  it('4 per new event; 3 for a new group, 2 for an existing group, 1 for the counter (2 on its first row); 0 for duplicates', async () => {
+    const day = '2040-01-01';
+    try {
+      await withLimits({ max_group_events: 10_000, max_group_bytes: 10_000_000 }, async () => {
+        const group = await freshGroup();
+        const first = [envelope({ cipherBytes: 17 })];
+        // The day's first counted append, creating its group: 2 + 3 + 4.
+        expect((await stored(group.groupId, first, day, 1_000)).rowsWritten).toBe(9);
+        // One new event to an existing group, later: 1 + 2 (last_write_at and its index entry) + 4.
+        expect((await stored(group.groupId, [envelope()], day, 2_000)).rowsWritten).toBe(7);
+        // A full batch to an existing group: 1 + 2 + 25 × 4.
+        const full = Array.from({ length: 25 }, () => envelope({ cipherBytes: 17 }));
+        expect((await stored(group.groupId, full, day, 3_000)).rowsWritten).toBe(103);
+        // Duplicates only: nothing at all, the counter included.
+        expect((await stored(group.groupId, full, day, 4_000)).rowsWritten).toBe(0);
+        // One new event to a new group, not the day's first: 1 + 3 + 4, the worst case per event.
+        const other = await freshGroup();
+        expect((await stored(other.groupId, [envelope()], day, 5_000)).rowsWritten).toBe(8);
+        // last_write_at moved once per append, and never backwards.
+        await stored(group.groupId, [envelope()], day, 2_500);
+        expect(
+          await env.DB.prepare('SELECT last_write_at FROM groups WHERE id = ?')
+            .bind(group.groupId)
+            .first('last_write_at'),
+        ).toBe(3_000);
+      });
+    } finally {
+      await env.DB.prepare('DELETE FROM counters WHERE day = ?').bind(day).run();
+    }
   });
 });

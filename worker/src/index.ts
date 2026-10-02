@@ -53,9 +53,14 @@ function errorResponse(error: unknown, route: string | null): Response {
 
 /**
  * Deletes groups with no successful write for `retention_days` (read from the limits table, the value /v1/info
- * publishes), their events, and daily counters older than a week. Reads do not keep a group alive.
+ * publishes), their events, and daily counters older than a week, within `bounds` (db.ts); whatever is left goes on
+ * the next day's run. Reads do not keep a group alive.
  */
-export async function expireIdleGroups(env: Env, nowMs: number): Promise<number | undefined> {
+export async function expireIdleGroups(
+  env: Env,
+  nowMs: number,
+  bounds: store.ExpiryBounds = store.EXPIRY_BOUNDS,
+): Promise<store.ExpiryResult | undefined> {
   let retentionDays: number;
   try {
     retentionDays = (await store.loadLimits(env.DB)).retention_days;
@@ -67,7 +72,12 @@ export async function expireIdleGroups(env: Env, nowMs: number): Promise<number 
     return undefined;
   }
   const countersBefore = new Date(nowMs - COUNTER_DAYS_KEPT * DAY_MS).toISOString().slice(0, 10);
-  const deleted = await store.expire(env.DB, nowMs - retentionDays * DAY_MS, countersBefore);
-  logEvent('info', 'expiry', { groups_deleted: deleted, retention_days: retentionDays });
-  return deleted;
+  const result = await store.expire(env.DB, nowMs - retentionDays * DAY_MS, countersBefore, bounds);
+  logEvent('info', 'expiry', {
+    groups_deleted: result.groups,
+    rows_written: result.rowsWritten,
+    complete: result.complete,
+    retention_days: retentionDays,
+  });
+  return result;
 }

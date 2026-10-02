@@ -133,7 +133,7 @@ Every limit is a var in `wrangler.jsonc`, with the same names and defaults as th
 | `EVEN_RATE_WRITES_PER_MINUTE` | `60` | `RATE_WRITES` binding, appends |
 | `EVEN_RATE_GROUP_CREATES_PER_MINUTE` | `3` | `RATE_CREATES` binding, appends to a group with no row yet |
 | `EVEN_RATE_READS_PER_MINUTE` | `120`; **`5`** in `wrangler.jsonc`, the public server ([why](#event-reads-per-address)) | `RATE_READS` binding, event reads (`GET …/events`) |
-| `EVEN_DAILY_WRITE_BUDGET` | `0` (off); **`7400`** in `wrangler.jsonc`, the public server ([why](#the-daily-write-budget)) | `counters_budget` triggers, events stored per UTC day (duplicates not counted), all groups |
+| `EVEN_DAILY_WRITE_BUDGET` | `0` (off); **`6500`** in `wrangler.jsonc`, the public server ([why](#the-daily-write-budget)) | `counters_budget` triggers, events stored per UTC day (duplicates not counted), all groups |
 | `EVEN_OPERATOR` | empty | `/v1/info` `operator` |
 | `EVEN_TERMS_URL` | empty | `/v1/info` `terms` |
 
@@ -181,8 +181,9 @@ A run, in order:
    `database_id`: the run adds the id to its own copy of the file (one line, comments kept), and that copy goes
    away with the runner.
 3. Applies `schema.sql`, then `seed-limits.sql`, with `wrangler d1 execute even --remote --file`. Both are safe on
-   every run: the schema is all `CREATE … IF NOT EXISTS` (it adds what is missing, such as a new trigger, and
-   leaves data alone), and the seed is one upsert per limit. D1 runs a `--file` as an import, which is atomic;
+   every run: the schema is `CREATE … IF NOT EXISTS` (it adds what is missing, such as a new index or trigger, and
+   leaves data alone) except `events_count`, which it drops and creates again so that its current definition wins,
+   and the seed is one upsert per limit. D1 runs a `--file` as an import, which is atomic;
    Wrangler warns that the database does not serve queries while an import runs, which for these two small files
    is a moment per deploy.
 4. `wrangler deploy --env=""`: the top-level Worker, `even-sync`. `env.test` is for local conformance runs and is
@@ -245,53 +246,55 @@ are not needed.
 
 ### The daily write budget
 
-The public server stores at most **7,400 events per UTC day**, across all groups (`EVEN_DAILY_WRITE_BUDGET`,
+The public server stores at most **6,500 events per UTC day**, across all groups (`EVEN_DAILY_WRITE_BUDGET`,
 published as `limits.daily_write_budget`). It counts events stored, not append requests: an append of eight new
 events counts eight, and an envelope the group already holds counts nothing, so a device re-pushing what another
 device already stored costs nothing. A whole day at the budget writes at most about half of D1's free 100,000 rows,
 whatever shape the appends take.
 
 D1 counts one row written per table row inserted, updated or deleted, plus one per index entry the write touches.
-What one append writes, measured as `meta.rows_written` of the Worker's own batch against local D1:
+What one append writes, measured as `meta.rows_written` of the Worker's own batch against local D1 (and pinned by
+a test in `test/worker.test.ts`):
 
 | Statement in the append batch | Rows written |
 |---|---:|
 | the day's counter: the first counted append of the UTC day inserts it (row + primary-key index) | 2 |
 | the day's counter: every later append that stores at least one event updates it | 1 |
 | the day's counter, when every envelope is a duplicate (the statement inserts and updates nothing) | 0 |
-| the group row, only when the group is new (row + primary-key index) | 2 |
-| each new event: the row, its two indexes `(group_id, seq)` and `(group_id, id)`, and the `events_count` trigger's update of the group row | 4 |
+| the group row, only when the group is new (row + primary-key index + `last_write_at` index) | 3 |
+| the group's `last_write_at`, once per append to an existing group that stores anything (row + its index entry) | 2 |
+| each new event: the row, its two indexes `(group_id, seq)` and `(group_id, id)`, and the `events_count` trigger's update of the group's counts | 4 |
 | each duplicate event (`INSERT OR IGNORE` that inserts nothing) | 0 |
 
-An event therefore costs 4 rows plus its append's overhead: 1 for the counter, and 2 more when the append creates its
-group. The dearest day is one where every event arrives alone, each in a new group: 7 rows an event, so
-**7 × 7,400 + 1 = 51,801**, 52% of the daily limit, the same share the earlier budget of 500 append requests
-(500 × 104 = 52,000) allowed. Every other shape costs less:
+An event therefore costs 4 rows plus its append's overhead: 1 for the counter, and 3 more when the append creates
+its group or 2 when it does not. The dearest day is one where every event arrives alone, each in a new group:
+8 rows an event, so **8 × 6,500 + 1 = 52,001**, 52% of the daily limit, the same share the earlier budget of 500
+append requests (500 × 104 = 52,000) allowed. Every other shape costs less:
 
-| A day of 7,400 events, all arriving as | Rows written | Of 100,000 |
+| A day of 6,500 events, all arriving as | Rows written | Of 100,000 |
 |---|---:|---:|
-| one-event appends, each creating a group | 7 × 7,400 + 1 = 51,801 | 52% |
-| one-event appends to existing groups | 5 × 7,400 + 1 = 37,001 | 37% |
-| full 25-event appends to existing groups | 296 × 101 + 1 = 29,897 | 30% |
+| one-event appends, each creating a group | 8 × 6,500 + 1 = 52,001 | 52% |
+| one-event appends to existing groups | 7 × 6,500 + 1 = 45,501 | 46% |
+| full 25-event appends to existing groups | 260 × 103 + 1 = 26,781 | 27% |
 
-The budget is not sized at 4 rows an event (about 15,000 a day for the same share): a day of one-event appends to new
-groups would then write 105,001 rows and pass the limit. What 7,400 means in use: a group re-pushed in full after
+The budget is not sized at 4 rows an event (about 15,000 a day for the same share): a day of one-event appends to
+new groups would then write 120,001 rows and pass the limit. What 6,500 means in use: a group re-pushed in full after
 an epoch change (expiry, a deleted server copy, a move to this server) costs its event count once, since every other
-device's re-push is duplicates; a 3,400-event group takes 46% of a day, and a group at the 10,000-event cap needs
+device's re-push is duplicates; a 3,400-event group takes 52% of a day, and a group at the 10,000-event cap needs
 two days.
 
 The other 48,000 rows are for writes the budget does not count: deleting a group (`DELETE /v1/groups/{groupId}`), the
-daily expiry, and the 11 upserts of each deploy's seed. A delete writes one row per event and one for the group as
-measured locally; if D1 also counts the deleted index entries, as its documentation suggests, it is up to 3 per
-event. The headroom is 16,000 to 48,000 deleted events a day; a group at the 10,000-event cap costs 10,001 to 30,002
-rows. Deletes are bounded by what is stored, not by the budget, so a day of several deletes of full groups can still
-reach the limit. Reads are not the constraint for appends: an append reads about 8 rows per new event plus 6, and
-about 12 more in its prelude, so a day at the budget reads at most about 200,000 of the 5 million (all one-event
-appends). An append of duplicates only writes nothing and is not counted, but still reads about 5 rows per
-envelope; those are bounded per address by `EVEN_RATE_WRITES_PER_MINUTE`, not by the budget.
+daily expiry (at most about 10,000 rows a run, plus one group; [Expiry](#expiry)), and the 11 upserts of each
+deploy's seed. A delete writes one row per event and one for the group as measured locally; if D1 also counts the
+deleted index entries, as its documentation suggests, it is up to 3 per event and 3 for the group. A group at the
+10,000-event cap costs 10,001 to 30,003 rows. Deletes are bounded by what is stored, not by the budget, so a day of several deletes
+of full groups can still reach the limit. Reads are not the constraint for appends: an append reads about 8 rows per
+new event plus 6, and about 12 more in its prelude, so a day at the budget reads at most about 170,000 of the
+5 million (all one-event appends). An append of duplicates only writes nothing and is not counted, but still reads
+about 5 rows per envelope; those are bounded per address by `EVEN_RATE_WRITES_PER_MINUTE`, not by the budget.
 
 To change the budget, edit the var and merge ([Changing a limit](#changing-a-limit)); the next deploy seeds it, and
-`/v1/info` publishes it as `limits.daily_write_budget`. Size it in events, with 7 rows written per event as the worst
+`/v1/info` publishes it as `limits.daily_write_budget`. Size it in events, with 8 rows written per event as the worst
 case.
 
 ### Event reads per address
@@ -364,8 +367,17 @@ A cron trigger (`17 3 * * *`, daily) deletes groups with no successful write for
 `limits` table, the value `/v1/info` publishes), their events, and daily counters older than a week. Reads do not
 keep a group alive. If the `retention_days` row is missing, it deletes nothing and logs `expiry_skipped`.
 
+A run is bounded, so a backlog (a year after a busy month, say) cannot become one transaction too large for D1 or
+the day's 100,000 rows written, failing every day and never expiring anything. It deletes whole groups, oldest first,
+in batches of at most 100 groups and about 1,000 events (a group larger than that goes alone; a group is never split,
+since a group left alive with part of its log would keep its epoch). It stops when nothing idle is left, after 20
+batches, or once it has written 10,000 rows, and the next day's run carries on. The bounds are `EXPIRY_BOUNDS` in
+`src/db.ts`; raise them on a paid plan. The groups are found through the `groups_last_write_at` index, so a run reads
+only what it deletes.
+
 Try it locally with `npx wrangler dev --test-scheduled`, then `curl "http://127.0.0.1:8787/__scheduled?cron=17+3+*+*+*"`;
-the log shows `{"level":"info","event":"expiry","groups_deleted":…,"retention_days":…}`.
+the log shows `{"level":"info","event":"expiry","groups_deleted":…,"rows_written":…,"complete":true,"retention_days":…}`
+(`complete: false` means idle groups were left for the next run).
 
 ## Rate limits and the daily budget
 
@@ -444,7 +456,7 @@ The Worker's only `503` is `over_budget`. It writes no separate event, only its 
 To see it, open **Workers & Pages → even-sync → Observability** and search for `"status":503`; Workers Logs keeps 3
 days on Free. The count behind it is in D1: in **D1 → even → Console**, run
 `SELECT day, writes FROM counters ORDER BY day DESC` (a week of days is kept; `writes` is events stored). A day
-that tripped reads at most the budget, `7400`, and never more, because the triggers refuse any count past it. It can
+that tripped reads at most the budget, `6500`, and never more, because the triggers refuse any count past it. It can
 read a little less: an append is refused whole when its new events do not all fit, so the last refused append may
 have been larger than what was left (at most `max_batch`, 25).
 

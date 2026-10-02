@@ -38,6 +38,9 @@ CREATE TABLE IF NOT EXISTS events (
   UNIQUE     (group_id, id)
 );
 
+-- Expiry takes idle groups oldest first, a bounded batch at a time (design.md, "Expiry").
+CREATE INDEX IF NOT EXISTS groups_last_write_at ON groups (last_write_at);
+
 -- Caps and counters live in SQL so that a batch of statements is atomic.
 -- BEFORE INSERT triggers fire before the uniqueness check, so a duplicate
 -- must be excluded here explicitly or a full group would reject duplicates.
@@ -54,11 +57,17 @@ BEGIN
   SELECT RAISE(ABORT, 'group_full');
 END;
 
-CREATE TRIGGER IF NOT EXISTS events_count AFTER INSERT ON events
+-- last_write_at is indexed (groups_last_write_at, below), and an UPDATE that assigns an indexed column rewrites its
+-- index entry even when the value does not change, which on D1 is a row written. So the counts are updated per event
+-- and last_write_at only when it moves: once per append to an existing group, never for a group created by the
+-- append (its row is inserted with it). It never moves backwards. Replaced on every run (DROP, then CREATE) so that a
+-- database created with an earlier definition gets this one; that leaves data alone.
+DROP TRIGGER IF EXISTS events_count;
+CREATE TRIGGER events_count AFTER INSERT ON events
 BEGIN
-  UPDATE groups SET bytes = bytes + NEW.size, events = events + 1,
-                    last_write_at = NEW.created_at
-   WHERE id = NEW.group_id;
+  UPDATE groups SET bytes = bytes + NEW.size, events = events + 1 WHERE id = NEW.group_id;
+  UPDATE groups SET last_write_at = NEW.created_at
+   WHERE id = NEW.group_id AND last_write_at < NEW.created_at;
 END;
 
 -- The daily write budget counts events stored, duplicates not counted. The append batch adds the number of its
