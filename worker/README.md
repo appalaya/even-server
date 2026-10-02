@@ -131,7 +131,7 @@ Every limit is a var in `wrangler.jsonc`, with the same names and defaults as th
 | `EVEN_RATE_REQUESTS_PER_MINUTE` | `120` | `RATE_REQUESTS` binding, every request to a documented route |
 | `EVEN_RATE_WRITES_PER_MINUTE` | `60` | `RATE_WRITES` binding, appends |
 | `EVEN_RATE_GROUP_CREATES_PER_MINUTE` | `3` | `RATE_CREATES` binding, appends to a group with no row yet |
-| `EVEN_DAILY_WRITE_BUDGET` | `0` (off) | appends, all groups; set it on the public server |
+| `EVEN_DAILY_WRITE_BUDGET` | `0` (off); **`500`** in `wrangler.jsonc`, the public server ([why](#the-daily-write-budget)) | `counters_budget` trigger, append requests per UTC day, all groups |
 | `EVEN_OPERATOR` | empty | `/v1/info` `operator` |
 | `EVEN_TERMS_URL` | empty | `/v1/info` `terms` |
 
@@ -155,7 +155,7 @@ and keeps using the table.
 
 Locally, `npm run db:seed` (or `db:seed:test`) does the seeding; `wrangler dev` picks up config edits by itself.
 
-For the public server, set `EVEN_DAILY_WRITE_BUDGET`, `EVEN_OPERATOR` and `EVEN_TERMS_URL` this way. Each
+For the public server, set `EVEN_OPERATOR` and `EVEN_TERMS_URL` this way (`EVEN_DAILY_WRITE_BUDGET` is set). Each
 `ratelimits` `namespace_id` must be unique within the account; change them if another Worker already uses 4101–4103.
 
 A note on raising `EVEN_MAX_BATCH`: an append is one prelude batch (4 statements) plus one write batch
@@ -237,8 +237,49 @@ Everything the deploy turns on runs on the Workers Free plan: the Worker (100,00
 request), the cron trigger (5 per account on Free; this uses 1), the three Rate Limiting bindings (Cloudflare's
 documentation lists no plan requirement or price for them), Workers Logs (200,000 events a day, kept 3 days) and
 D1 (500 MB per database, 50 queries per invocation, 5 million rows read and 100,000 rows written a day). Past a
-daily D1 limit, queries fail until 00:00 UTC and the Worker answers `500`; `EVEN_DAILY_WRITE_BUDGET` is how to stop
-appends before that. Logpush and traces, which are off for privacy anyway, are not needed.
+daily D1 limit, every query, reads included, fails until 00:00 UTC and the Worker answers `500`;
+`EVEN_DAILY_WRITE_BUDGET` is how to stop appends before that. Logpush and traces, which are off for privacy anyway,
+are not needed.
+
+### The daily write budget
+
+The public server allows **500 append requests per UTC day**, across all groups (`EVEN_DAILY_WRITE_BUDGET`), so a
+whole day of appends at the budget, every one as expensive as an append can be, writes about half of D1's free
+100,000 rows.
+
+D1 counts one row written per table row inserted, updated or deleted, plus one per index entry the write touches.
+What one append writes, measured as `meta.rows_written` of the Worker's own batch against local D1:
+
+| Statement in the append batch | Rows written |
+|---|---:|
+| the day's counter: the first append of the UTC day inserts it (row + primary-key index) | 2 |
+| the day's counter: every later append updates it | 1 |
+| the group row, only when the group is new (row + primary-key index) | 2 |
+| each new event: the row, its two indexes `(group_id, seq)` and `(group_id, id)`, and the `events_count` trigger's update of the group row | 4 |
+| each duplicate event (`INSERT OR IGNORE` that inserts nothing) | 0 |
+
+An append therefore writes 1 + 4 × (new events) rows: at most 1 + 4 × 25 + 2 = 103 (a full `max_batch` to a new
+group), 104 for the first of the day. **500 × 104 = 52,000**, 52% of the daily limit. An append from the app usually
+carries one to three events (5 to 13 rows), so a busy real day at the budget is nearer 5,000.
+
+The other 48,000 rows are for writes the budget does not count: deleting a group (`DELETE /v1/groups/{groupId}`), the
+daily expiry, and the 10 upserts of each deploy's seed. A delete writes one row per event and one for the group as
+measured locally; if D1 also counts the deleted index entries, as its documentation suggests, it is up to 3 per
+event. The headroom is 16,000 to 48,000 deleted events a day; a group at the 10,000-event cap costs 10,001 to 30,002
+rows. Deletes are bounded by what is stored, not by the budget, so a day of several deletes of full groups can still
+reach the limit. Reads are not the constraint for appends: one reads about 190 rows, so 500 of them read under
+100,000 of the 5 million.
+
+The per-IP limits do not protect the Workers Free cap of 100,000 requests a day, and are not meant to. One client
+at `EVEN_RATE_REQUESTS_PER_MINUTE` (120) could make 172,800 requests a day and use the whole cap in about 14 hours;
+holding one address under it would need 69 a minute or fewer, and two addresses would still reach it. Past the cap
+Cloudflare answers error 1027 until 00:00 UTC: a quiet day, not a bill. D1's 5 million rows read are similar: a
+full page (`max_page` 500) reads about 515 rows, so one client reading full pages at 120 a minute would spend the
+day's reads in about 80 minutes, and D1 would then refuse every query until 00:00 UTC. The write budget covers
+neither.
+
+To change the budget, edit the var and merge ([Changing a limit](#changing-a-limit)); the next deploy seeds it, and
+`/v1/info` publishes it as `limits.daily_write_budget`.
 
 ## Takedown (blocklist)
 
