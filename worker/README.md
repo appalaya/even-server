@@ -132,7 +132,7 @@ Every limit is a var in `wrangler.jsonc`, with the same names and defaults as th
 | `EVEN_RATE_WRITES_PER_MINUTE` | `60` | `RATE_WRITES` binding, appends |
 | `EVEN_RATE_GROUP_CREATES_PER_MINUTE` | `3` | `RATE_CREATES` binding, appends to a group with no row yet |
 | `EVEN_RATE_READS_PER_MINUTE` | `720`; **`25`** in `wrangler.jsonc`, the public server ([why](#event-reads-per-address)) | `RATE_READS` binding, event reads (`GET …/events`) in units of 100 D1 rows read |
-| `EVEN_DAILY_WRITE_BUDGET` | `6500` ([why](#the-daily-write-budget)); `0` turns it off | `counters_budget` triggers, events stored per UTC day (duplicates not counted), all groups |
+| `EVEN_DAILY_WRITE_BUDGET` | `50000` ([why](#the-daily-write-budget)); `0` turns it off | `counters_budget` triggers, events stored per UTC day (duplicates not counted), all groups |
 | `EVEN_OPERATOR` | empty | `/v1/info` `operator` |
 | `EVEN_TERMS_URL` | empty | `/v1/info` `terms` |
 
@@ -245,7 +245,7 @@ are not needed.
 
 ### The daily write budget
 
-The public server stores at most **6,500 events per UTC day**, across all groups (`EVEN_DAILY_WRITE_BUDGET`,
+The public server stores at most **50,000 events per UTC day**, across all groups (`EVEN_DAILY_WRITE_BUDGET`,
 published as `limits.daily_write_budget`). It counts events stored, not append requests: an append of eight new
 events counts eight, and an envelope the group already holds counts nothing, so a device re-pushing what another
 device already stored costs nothing. A whole day at the budget writes at most about half of D1's free 100,000 rows,
@@ -267,17 +267,18 @@ a test in `test/worker.test.ts`):
 
 An event therefore costs 4 rows plus its append's overhead: 1 for the counter, and 3 more when the append creates
 its group or 2 when it does not. The dearest day is one where every event arrives alone, each in a new group:
-8 rows an event, so **8 × 6,500 + 1 = 52,001**, 52% of the daily limit, the same share the earlier budget of 500
+8 rows an event. Sized on 2 October 2026 for Workers Paid: the worst day writes **8 × 50,000 + 1 = 400,001** rows, about a quarter of
+the plan's included 50 million rows a month spread over 30 days; on the earlier Free plan the budget was 6,500 (52% of its 100,000 rows a day).
 append requests (500 × 104 = 52,000) allowed. Every other shape costs less:
 
-| A day of 6,500 events, all arriving as | Rows written | Of 100,000 |
+| A day of 50,000 events, all arriving as | Rows written | Of 1.67 M (50 M a month ÷ 30) |
 |---|---:|---:|
-| one-event appends, each creating a group | 8 × 6,500 + 1 = 52,001 | 52% |
-| one-event appends to existing groups | 7 × 6,500 + 1 = 45,501 | 46% |
+| one-event appends, each creating a group | 8 × 50,000 + 1 = 400,001 | 24% |
+| one-event appends to existing groups | 7 × 50,000 + 1 = 350,001 | 21% |
 | full 25-event appends to existing groups | 260 × 103 + 1 = 26,781 | 27% |
 
 The budget is not sized at 4 rows an event (about 15,000 a day for the same share): a day of one-event appends to
-new groups would then write 120,001 rows and pass the limit. What 6,500 means in use: a group re-pushed in full after
+new groups would then write 120,001 rows and pass the limit. What 50,000 means in use: a group re-pushed in full after
 an epoch change (expiry, a deleted server copy, a move to this server) costs its event count once, since every other
 device's re-push is duplicates; a 3,400-event group takes 52% of a day, and a group at the 10,000-event cap needs
 two days.
@@ -314,7 +315,7 @@ minutes, after which D1 refuses every query until 00:00 UTC.
 
 So event reads have their own allowance per address, counted in **units of 100 rows**: a read costs ceil(rows / 100)
 units, at least 1, so a read of E events costs ceil((14 + E) / 100): a quiet poll or a read of up to 86 events costs
-1, and a full page costs 6. The public server allows **25 units a minute** (`EVEN_RATE_READS_PER_MINUTE` and the `RATE_READS`
+1, and a full page costs 6. The public server allows **120 units a minute** (`EVEN_RATE_READS_PER_MINUTE` and the `RATE_READS`
 binding; `/v1/info` publishes it as `limits.rate.reads_per_minute`). Every unit pays for at most 100 rows, so a whole
 day at the allowance reads at most 25 × 100 × 1,440 = **3,600,000 rows, 72%** of the quota, whatever size the reads
 are. The published name stays: a read of up to 100 rows is one read, and only larger ones count more. The default
@@ -330,7 +331,7 @@ the allowance runs out partway, the read is refused with `429` and `Retry-After:
 units it did take stay spent, which uses up the address's minute: a refused client reads no further page until the
 minute is over, however many reads it has in flight. The rows of a refused read (its prelude, 12) are paid by its
 first unit. Two small exceptions: events appended between the prelude and the read are read without being counted
-(at most what is appended in those milliseconds; the daily write budget caps all appends at 6,500 events a day), and
+(at most what is appended in those milliseconds; the daily write budget caps all appends at 50,000 events a day), and
 a read is never charged more than the whole allowance, so that a full page always fits in a fresh minute even if
 `EVEN_MAX_PAGE` is raised past what `EVEN_RATE_READS_PER_MINUTE` covers. Size the two together: a full page costs
 ceil((`max_page` + 14) / 100) units.
@@ -490,7 +491,7 @@ The Worker's only `503` is `over_budget`. It writes no separate event, only its 
 To see it, open **Workers & Pages → even-sync → Observability** and search for `"status":503`; Workers Logs keeps 3
 days on Free. The count behind it is in D1: in **D1 → even → Console**, run
 `SELECT day, writes FROM counters ORDER BY day DESC` (a week of days is kept; `writes` is events stored). A day
-that tripped reads at most the budget, `6500`, and never more, because the triggers refuse any count past it. It can
+that tripped reads at most the budget, `50000`, and never more, because the triggers refuse any count past it. It can
 read a little less: an append is refused whole when its new events do not all fit, so the last refused append may
 have been larger than what was left (at most `max_batch`, 25).
 

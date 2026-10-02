@@ -66,8 +66,8 @@
     // most 52,001 of the Free plan's 100,000 rows written a day (README.md, "The daily write budget").
     "EVEN_DAILY_WRITE_BUDGET": "50000",
     // Optional strings shown to users in /v1/info; empty means unset.
-    "EVEN_OPERATOR": "",
-    "EVEN_TERMS_URL": ""
+    "EVEN_OPERATOR": "Appalaya Inc.",
+    "EVEN_TERMS_URL": "https://even.appalaya.com/terms"
   },
 
   "env": {
