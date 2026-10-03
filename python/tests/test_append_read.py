@@ -1,3 +1,4 @@
+import logging
 import time
 
 import pytest
@@ -60,6 +61,60 @@ def test_received_at_is_one_value_per_request_kept_for_duplicates_and_fresh_afte
     assert client.delete(group.path, headers=group.headers).status_code == 204
     assert at([a, b], 1_000) == [1_000, 1_000]
     assert last_write_at() == 1_000
+
+
+def _arrival_warnings(caplog):
+    return [r.fields for r in caplog.records if r.name == "even.arrival"]
+
+
+def test_arrival_ahead_is_logged_once_per_append_that_stores_something_never_with_a_group_id(client, caplog):
+    """A fake clock that jumped forward: push a group's own last_write_at 5 minutes into the future, directly in
+    storage, as the Worker's equivalent test does. The next append (at the real, unmoved clock) stores something
+    and must warn once, with the lead in milliseconds and the route pattern only."""
+    caplog.set_level(logging.INFO)
+    store = client.app.state.store
+    group = new_group()
+    client.post(group.events, json=batch(envelope()), headers=group.headers)  # creates the group row
+    now_ms = time.time_ns() // 1_000_000
+    store._conn.execute("UPDATE groups SET last_write_at = ? WHERE id = ?", (now_ms + 300_000, group.id))
+
+    response = client.post(group.events, json=batch(envelope()), headers=group.headers)
+    assert response.status_code == 200
+    warnings = _arrival_warnings(caplog)
+    assert len(warnings) == 1
+    assert warnings[0]["route"] == "/v1/groups/{groupId}/events"
+    assert warnings[0]["ahead_ms"] > 60_000
+    assert set(warnings[0]) == {"event", "ahead_ms", "route"}
+    written = "\n".join(repr(r.fields) for r in caplog.records if hasattr(r, "fields"))
+    assert group.id not in written
+
+    # The clock back to normal does not undo it: last_write_at is stuck ahead (the bug this only warns about), so
+    # the next append that stores something warns again.
+    caplog.clear()
+    again = client.post(group.events, json=batch(envelope()), headers=group.headers)
+    assert again.status_code == 200
+    assert len(_arrival_warnings(caplog)) == 1
+
+    # An append of duplicates only stores nothing, so it does not warn even though the clock is still ahead.
+    dupe = envelope()
+    client.post(group.events, json=batch(dupe), headers=group.headers)
+    caplog.clear()
+    client.post(group.events, json=batch(dupe), headers=group.headers)
+    assert _arrival_warnings(caplog) == []
+
+
+def test_arrival_ahead_is_not_logged_within_60_seconds(client, caplog):
+    caplog.set_level(logging.INFO)
+    store = client.app.state.store
+    group = new_group()
+    client.post(group.events, json=batch(envelope()), headers=group.headers)
+    now_ms = time.time_ns() // 1_000_000
+    store._conn.execute("UPDATE groups SET last_write_at = ? WHERE id = ?", (now_ms + 1_000, group.id))
+
+    caplog.clear()
+    response = client.post(group.events, json=batch(envelope()), headers=group.headers)
+    assert response.status_code == 200
+    assert _arrival_warnings(caplog) == []
 
 
 def test_seq_continues_across_requests(client):

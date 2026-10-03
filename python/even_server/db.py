@@ -128,6 +128,10 @@ class AppendResult:
     # The stored received_at (events.created_at) of every id in the request,
     # those it found already stored included: what the response reports.
     received_at: dict[str, int]
+    # The group's last_write_at as it stands after this append (ADVANCE_ARRIVAL
+    # above), compared against the request's own now_ms by the caller to warn
+    # when a forward clock jump has left it stuck in the future (README.md).
+    last_write_at: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -265,14 +269,16 @@ class Store:
                         raise
                     raise GroupFull(self._full_reason(conn, group_id, e.size)) from None
                 accepted += cursor.rowcount  # 1 inserted, 0 ignored as a duplicate
-            epoch_now, seq = conn.execute(
-                "SELECT epoch, (SELECT MAX(seq) FROM events WHERE group_id = ?) FROM groups WHERE id = ?",
+            epoch_now, last_write_at, seq = conn.execute(
+                "SELECT epoch, last_write_at, (SELECT MAX(seq) FROM events WHERE group_id = ?) FROM groups WHERE id = ?",
                 (group_id, group_id),
             ).fetchone()
             received_at = dict(conn.execute(STORED_ARRIVALS, (group_id, ids)).fetchall())
         if len(received_at) != len(envelopes):
             raise RuntimeError("stored event missing after append")
-        return AppendResult(accepted=accepted, seq=seq or 0, epoch=epoch_now, received_at=received_at)
+        return AppendResult(
+            accepted=accepted, seq=seq or 0, epoch=epoch_now, received_at=received_at, last_write_at=last_write_at
+        )
 
     @staticmethod
     def _full_reason(conn: sqlite3.Connection, group_id: str, size: int) -> str:

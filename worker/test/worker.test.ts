@@ -149,6 +149,53 @@ describe('append, read, delete', () => {
     }
   });
 
+  it('warns arrival_ahead once a group\'s clock has jumped more than 60s into the future, never with a group id', async () => {
+    const group = await freshGroup();
+    await append(group, [envelope()]); // creates the group row at a normal last_write_at
+    const now = Date.now();
+
+    // A fake clock that jumped forward: the group's own arrival time, 5 minutes ahead of real time.
+    await env.DB.prepare('UPDATE groups SET last_write_at = ? WHERE id = ?')
+      .bind(now + 300_000, group.groupId)
+      .run();
+    const ahead = await append(group, [envelope()]);
+    expect(ahead.status).toBe(200);
+    const warnings = lines.filter((line) => line.event === 'arrival_ahead');
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toMatchObject({ level: 'warn', route: '/v1/groups/{groupId}/events' });
+    expect(warnings[0]!.ahead_ms).toBeGreaterThan(60_000);
+    expect(Object.keys(warnings[0]!).sort()).toEqual(['ahead_ms', 'event', 'level', 'route']);
+    expect(raw.join('\n')).not.toContain(group.groupId);
+
+    // The clock back to normal does not undo it: last_write_at is stuck ahead (the bug this only warns about), so
+    // the next append that stores something warns again.
+    lines.length = 0;
+    raw.length = 0;
+    const still = await append(group, [envelope()]);
+    expect(still.status).toBe(200);
+    expect(lines.filter((line) => line.event === 'arrival_ahead')).toHaveLength(1);
+
+    // An append of duplicates only stores nothing, so it does not warn even though the clock is still ahead.
+    lines.length = 0;
+    const dupe = envelope();
+    await append(group, [dupe]);
+    lines.length = 0;
+    await append(group, [dupe]);
+    expect(lines.filter((line) => line.event === 'arrival_ahead')).toHaveLength(0);
+  });
+
+  it('does not warn when a group\'s clock is ahead by 60s or less', async () => {
+    const group = await freshGroup();
+    await append(group, [envelope()]);
+    await env.DB.prepare('UPDATE groups SET last_write_at = ? WHERE id = ?')
+      .bind(Date.now() + 1_000, group.groupId)
+      .run();
+    lines.length = 0;
+    const response = await append(group, [envelope()]);
+    expect(response.status).toBe(200);
+    expect(lines.filter((line) => line.event === 'arrival_ahead')).toHaveLength(0);
+  });
+
   it('stores v: 1.0 as the integer 1', async () => {
     const group = await freshGroup();
     const text = JSON.stringify({ events: [envelope()] }).replace('"v":1', '"v":1.0');

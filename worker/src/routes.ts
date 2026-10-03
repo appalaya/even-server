@@ -194,6 +194,7 @@ async function appendEvents(request: Request, env: Env, route: Route): Promise<R
         : `write would exceed max_group_${reason} (${reason === 'bytes' ? limits.max_group_bytes : limits.max_group_events})`;
     throw new ApiError(413, 'group_full', detail, reason === undefined ? {} : { reason });
   }
+  if (result.accepted > 0) warnIfArrivalAhead(result.lastWriteAt, now.getTime(), route.pattern);
   return json({
     accepted: result.accepted,
     duplicates: envelopes.length - result.accepted,
@@ -208,6 +209,20 @@ function storedArrival(result: store.AppendResult, id: string): number {
   const value = result.receivedAt.get(id);
   if (value === undefined) throw new Error('stored event missing after append');
   return value;
+}
+
+/**
+ * MAX(now, last_write_at + 1) (db.ts, ADVANCE_ARRIVAL) keeps a group's arrival clock in the future for good after
+ * one forward jump of the server clock, which silently disables the clients' hold for that group and delays its
+ * expiry (README.md, "Alerts"). Warn once per append that stores anything, never with a group id or address.
+ */
+const ARRIVAL_AHEAD_THRESHOLD_MS = 60_000;
+
+function warnIfArrivalAhead(lastWriteAt: number, nowMs: number, route: string): void {
+  const aheadMs = lastWriteAt - nowMs;
+  if (aheadMs > ARRIVAL_AHEAD_THRESHOLD_MS) {
+    logEvent('warn', 'arrival_ahead', { ahead_ms: aheadMs, route });
+  }
 }
 
 /** Reads at most `maxBytes` of body and parses it as JSON; anything else is `400 invalid_request`. */

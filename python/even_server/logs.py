@@ -14,6 +14,7 @@ from typing import Any
 
 request_log = logging.getLogger("even.request")
 error_log = logging.getLogger("even.error")
+arrival_log = logging.getLogger("even.arrival")
 
 KNOWN_METHODS = frozenset({"GET", "HEAD", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"})
 
@@ -77,6 +78,18 @@ def log_request(method: str, route: str | None, status: int | None, ms: float) -
         "status": status,
         "ms": round(ms, 1),
         "limited": status == 429,
+    }})
+
+
+def log_arrival_ahead(route: str | None, ahead_ms: int) -> None:
+    """A group's arrival clock (last_write_at, ADVANCE_ARRIVAL in db.py) ended up more than 60s ahead of this
+    request's clock after an append that stored something: a forward jump of the host clock, caught here rather
+    than in db.py, which has no route to log with. The lead in milliseconds and the route pattern only, never a
+    group id (THREAT-MODEL.md "What we log")."""
+    arrival_log.warning("arrival ahead", extra={"fields": {
+        "event": "arrival_ahead",
+        "ahead_ms": ahead_ms,
+        "route": route,
     }})
 
 

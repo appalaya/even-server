@@ -27,6 +27,12 @@ export interface AppendResult {
   receivedAt: ReadonlyMap<string, number>;
   /** D1's `meta.rows_written` summed over the batch: what the daily write budget is sized against (README.md). */
   rowsWritten: number;
+  /**
+   * The group's `last_write_at` as it stands after this append (ADVANCE_ARRIVAL above). Compared against the
+   * request's own `nowMs` by the caller to warn when a forward clock jump has left it stuck in the future
+   * (README.md, "Alerts"); carries no group id or address.
+   */
+  lastWriteAt: number;
 }
 
 export interface StoredEvent {
@@ -172,7 +178,7 @@ export async function append(
     ...envelopes.map((e) => db.prepare(INSERT_EVENT).bind(groupId, e.id, e.v, e.n, e.c, e.size)),
     db
       .prepare(
-        'SELECT epoch, (SELECT MAX(seq) FROM events WHERE group_id = ?1) AS seq FROM groups WHERE id = ?1',
+        'SELECT epoch, last_write_at, (SELECT MAX(seq) FROM events WHERE group_id = ?1) AS seq FROM groups WHERE id = ?1',
       )
       .bind(groupId),
     db.prepare(STORED_ARRIVALS).bind(groupId, ids),
@@ -189,7 +195,7 @@ export async function append(
   const inserts = results.slice(3, 3 + envelopes.length);
   const accepted = inserts.reduce((sum, result) => sum + (result.meta.changes > 0 ? 1 : 0), 0);
   const row = results[3 + envelopes.length]?.results[0];
-  if (row === undefined || typeof row.epoch !== 'string')
+  if (row === undefined || typeof row.epoch !== 'string' || typeof row.last_write_at !== 'number')
     throw new Error('group row missing after append');
   const receivedAt = new Map<string, number>();
   for (const stored of results[4 + envelopes.length]?.results ?? []) {
@@ -204,6 +210,7 @@ export async function append(
     epoch: row.epoch,
     receivedAt,
     rowsWritten,
+    lastWriteAt: row.last_write_at,
   };
 }
 
