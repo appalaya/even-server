@@ -147,7 +147,7 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: npx wrangler deploy --env=""
 
-      - name: Check /v1/info and write the summary
+      - name: Write the summary
         env:
           D1_ID: ${{ steps.d1.outputs.id }}
           D1_CREATED: ${{ steps.d1.outputs.created }}
@@ -181,47 +181,9 @@ jobs:
             '',
           );
 
-          // The custom domain is attached by hand once, after the first deploy. Until then the name does not resolve.
-          let info;
-          let lastError = '';
-          for (let attempt = 1; attempt <= 6 && info === undefined; attempt++) {
-            if (attempt > 1) await new Promise((resolve) => setTimeout(resolve, 10_000));
-            try {
-              const response = await fetch(`${server}/v1/info`, { signal: AbortSignal.timeout(10_000) });
-              const body = await response.text();
-              if (response.ok) info = JSON.parse(body);
-              else lastError = `HTTP ${response.status}: ${body.slice(0, 200)}`;
-            } catch (error) {
-              if (error?.cause?.code === 'ENOTFOUND') {
-                const message = `${new URL(server).host} does not resolve yet, so /v1/info was not checked. Attach the custom domain once (worker/README.md, "Deploying").`;
-                console.log(`::notice title=Custom domain not attached yet::${message}`);
-                lines.push('### Smoke check skipped', '', message);
-                finish(0);
-              }
-              lastError = String(error?.cause ?? error);
-            }
-            if (info === undefined) console.log(`Attempt ${attempt}: ${lastError}`);
-          }
-          if (info === undefined) {
-            console.log(`::error title=Smoke check failed::GET ${server}/v1/info: ${lastError}`);
-            lines.push('### Smoke check failed', '', `GET ${server}/v1/info: ${lastError}`);
-            finish(1);
-          }
-
-          const json = JSON.stringify(info, null, 2);
-          console.log(json);
-          lines.push('### GET /v1/info', '', '```json', json, '```', '');
-
-          // /v1/info is built from the limits table, so it must publish exactly what was seeded.
-          const { rate = {}, ...caps } = info.limits ?? {};
-          const published = { ...caps, ...rate, retention_days: info.retention_days };
-          const wrong = Object.entries(seeded).filter(([key, value]) => published[key] !== value);
-          if (wrong.length > 0) {
-            const detail = wrong.map(([key, value]) => `${key}: seeded ${value}, published ${published[key]}`).join('; ');
-            console.log(`::error title=Published limits differ from the seed::${detail}`);
-            lines.push(`**Published limits differ from the seed:** ${detail}`);
-            finish(1);
-          }
-          lines.push('Every seeded limit is published.');
+          // No request to the live server from here: Cloudflare's Bot Fight Mode challenges GitHub's runners, and the
+          // owner keeps it on. Check the deploy by hand from a trusted network: curl -s $SERVER_URL/v1/info must publish
+          // exactly the seeded limits above (worker/README.md, "Deploying").
+          lines.push('### Live check', '', `Not run from CI. Confirm by hand: \`curl -s ${server}/v1/info\` publishes the seeded limits.`);
           finish(0);
           EOF
