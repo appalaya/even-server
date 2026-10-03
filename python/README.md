@@ -169,6 +169,24 @@ makes uvicorn warn "Unsupported upgrade request." and "No supported WebSocket
 library detected"; both are expected, and installing a WebSocket library
 changes nothing.
 
+**When a group's arrival clock runs ahead.** A group's arrival time
+(`groups.last_write_at`, `received_at` on its events) is
+`MAX(now_ms, last_write_at + 1)` (`ADVANCE_ARRIVAL` in `even_server/db.py`), so
+one forward jump of the host clock leaves it ahead of real time for good: it
+silently disables the clients' hold for that group and delays its expiry.
+After an append that stores at least one event, if the group's
+`last_write_at` ends up more than 60 seconds ahead of the request's own
+clock, the server logs one line, no group id or address:
+
+```json
+{"event":"arrival_ahead","ahead_ms":123456,"route":"/v1/groups/{groupId}/events"}
+```
+
+Search `arrival_ahead` for it. It recurs on every later append to the same
+group that stores something, since the jump is never undone by itself; it
+clears only if the group is deleted and recreated, or the clock catches up to
+what it was skewed to and stays there.
+
 ## Without opening ports: tunnels
 
 - **Cloudflare Tunnel** (`cloudflared`): route a hostname to

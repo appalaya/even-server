@@ -122,6 +122,8 @@ def create_app(config: Config, *, store: Store | None = None, limiter: RateLimit
         except OverBudget:
             raise ApiError(503, "over_budget", "the server's daily write budget is exhausted; reads still work",
                            headers={"Retry-After": str(_seconds_until_utc_midnight(now))}) from None
+        if result.accepted > 0:
+            _warn_if_arrival_ahead(result.last_write_at, now_ms, _route_pattern(request.scope))
         return JSON({
             "accepted": result.accepted,
             "duplicates": len(envelopes) - result.accepted,
@@ -195,6 +197,18 @@ def _query_int(request: Request, name: str, default: int) -> int:
 def _seconds_until_utc_midnight(now: datetime) -> int:
     midnight = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
     return max(1, math.ceil((midnight - now).total_seconds()))
+
+
+# MAX(now_ms, last_write_at + 1) (db.py, ADVANCE_ARRIVAL) keeps a group's arrival clock in the future for good
+# after one forward jump of the host clock, which silently disables the clients' hold for that group and delays
+# its expiry (README.md). Warn once per append that stores anything, never with a group id or address.
+_ARRIVAL_AHEAD_THRESHOLD_MS = 60_000
+
+
+def _warn_if_arrival_ahead(last_write_at: int, now_ms: int, route: str | None) -> None:
+    ahead_ms = last_write_at - now_ms
+    if ahead_ms > _ARRIVAL_AHEAD_THRESHOLD_MS:
+        logs.log_arrival_ahead(route, ahead_ms)
 
 
 # -- error mapping ------------------------------------------------------------

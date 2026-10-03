@@ -440,8 +440,8 @@ the log shows `{"level":"info","event":"expiry","groups_deleted":…,"rows_writt
 
 The Worker writes one JSON line per request, `{"method","route","status","ms","limited"}`, where `route` is the
 pattern (`/v1/groups/{groupId}/events`) or `null` for a 404. It never logs a URL, token, body, group id or IP.
-Operational lines (`expiry`, `limits_missing`, `ratelimit_binding_missing`, `unhandled_exception` with the exception
-type only) follow the same rule. `ms` is wall time, which in Workers advances only across I/O.
+Operational lines (`expiry`, `limits_missing`, `ratelimit_binding_missing`, `arrival_ahead`, `unhandled_exception`
+with the exception type only) follow the same rule. `ms` is wall time, which in Workers advances only across I/O.
 
 In `wrangler.jsonc`, Workers Logs keeps those lines, but **invocation logs are off** (they record the request URL),
 traces are off, and Logpush is off. What remains outside this code's control, and must be disclosed in the public
@@ -484,6 +484,24 @@ Free plan offers, per Cloudflare's [available notifications](https://developers.
 
 Without alerts, look in the dashboard: **Workers & Pages → even-sync → Metrics** (requests, errors) and **D1 →
 even → Metrics** (rows read and written per day, against the free 5 million and 100,000).
+
+### When a group's arrival clock runs ahead
+
+A group's arrival time (`groups.last_write_at`, `received_at` on its events) is `MAX(now, last_write_at + 1)`
+(`ADVANCE_ARRIVAL` in `src/db.ts`), so one forward jump of the server's clock leaves it ahead of real time for
+good: `now` on every later append stays below it, so the server keeps advancing it by 1 ms instead of catching up.
+That silently disables the clients' hold for that group (PROTOCOL.md §9, "Clock") and delays its expiry.
+After an append that stores at least one event, if the group's `last_write_at` ends up more than 60,000 ms ahead of
+`now`, the Worker logs one line, no group id or address:
+
+```
+{"level":"warn","event":"arrival_ahead","ahead_ms":123456,"route":"/v1/groups/{groupId}/events"}
+```
+
+To see it, open **Workers & Pages → even-sync → Observability** and search `arrival_ahead`; Workers Logs keeps 3
+days on Free. It recurs on every later append to the same group that stores something, since the clock jump is
+never undone by itself; it clears only if the group is deleted and recreated, or the server's clock catches up to
+what it was skewed to and stays there.
 
 ### When the budget trips
 
