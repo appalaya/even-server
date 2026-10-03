@@ -171,6 +171,46 @@ Consequences the design accepts:
   report. It clears the field at once, sends only the id and server, and
   loads Cloudflare Turnstile only after that.
 
+## The client's crypto code
+
+Once a startup self-test passes, the iOS and Android clients seal and open with XChaCha20-Poly1305 through a
+native module.
+
+- On iOS this is libsodium 1.0.22: prebuilt static libraries committed in swift-sodium 0.11.0's repository. Swift
+  Package Manager fetches them from GitHub at build time, at the commit pinned in Package.resolved. There is no
+  separate checksum; the app's CI hashes the library it resolved against known values.
+- On Android it is Google Tink 1.23.0 from Maven Central, pinned strictly and checksum-verified by Gradle, using
+  Tink's internal InsecureNonceXChaCha20Poly1305 class.
+- @noble/ciphers remains the reference. It is used on the web, in tests, and for the whole process whenever the
+  module is missing or fails the self-test, and any envelope the native code rejects is re-checked with @noble,
+  which decides; a disagreement switches the process to @noble.
+
+The wire format, AAD, padding, nonce generation (24 random bytes from the platform CSPRNG via
+crypto.getRandomValues, drawn in JavaScript) and key derivation (HKDF in JavaScript) are unchanged. Nothing new
+reaches the server or the disk.
+
+For the length of one call, the native code receives the encryption key, the nonce, the AAD (which contains the
+group id) and the padded plaintext or ciphertext. A call is one envelope, or up to 200 envelopes of one group in a
+batched open.
+
+- On iOS, libsodium reads and writes the JavaScript-owned buffers directly, without copying them. It wipes its own
+  derived secrets (the HChaCha20 subkey, the ChaCha20 state, and the Poly1305 key and state) before returning, and
+  leaves zeros after a failed open.
+- On Android, the key, nonce, AAD and data are copied into Java arrays. The module wipes its own copies after
+  use; Tink keeps further Java-array copies of the key and derived subkeys, and each result passes through one
+  transient native-heap buffer on its way back to JavaScript. Those are not wiped; they stay in memory until it is
+  reused.
+
+On neither platform does the native code keep a reference to any argument after the call, log anything, or use
+the network. JavaScript logs one fixed line naming the implementation. As before, JavaScript's own copies of keys
+and plaintext are not wiped either.
+
+This adds third-party native crypto to the client's trusted code: a prebuilt libsodium binary on iOS, and Tink
+with its small transitive dependencies on Android. Before the first store open, the self-test checks the native
+code against a published test vector, forged tags, ciphertext, AAD and nonces, a wrong key, empty inputs, offset
+views, sizes from 63 bytes to the 8,176-byte maximum, a 64-item batch containing forgeries, and random cases
+cross-checked with @noble.
+
 ## Abuse posture
 
 The free server is, by construction, an anonymous encrypted blob store. It can
