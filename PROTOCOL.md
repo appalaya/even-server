@@ -451,7 +451,8 @@ client's concern.
   client, invisible to the server. Clients can change what an expense looks
   like without any server anywhere being upgraded.
 - Additive fields in responses and additive endpoints (such as §6.5) are not a
-  version bump. Clients ignore response fields they do not know.
+  version bump. Clients MUST ignore response fields they do not know, including
+  fields inside each envelope of a page.
 
 ## 12. Conformance
 
