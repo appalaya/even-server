@@ -5,8 +5,8 @@ import { client, expectError, expectStatus, info, TestGroup } from './harness.ts
 import { malformed } from './keys.ts';
 
 describe('§7 routing', () => {
+  // Not `/` or `/robots.txt`: they are outside the protocol, and a server may answer them (PROTOCOL.md §7).
   const unknown: Array<[method: string, path: (id: string) => string]> = [
-    ['GET', () => '/'],
     ['GET', () => '/v1'],
     ['GET', () => '/v1/nope'],
     ['GET', () => '/v2/info'],

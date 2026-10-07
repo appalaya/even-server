@@ -266,6 +266,8 @@ describe('limits', () => {
 describe('matchRoute', () => {
   const id = 'Zmh6rfhivXdsj8GLjp-OIAiXFIVu4jOzkCpZHQ1fKSU';
   it.each([
+    ['/', '/'],
+    ['/robots.txt', '/robots.txt'],
     ['/v1/info', '/v1/info'],
     [`/v1/groups/${id}`, '/v1/groups/{groupId}'],
     [`/v1/groups/${id}/events`, '/v1/groups/{groupId}/events'],
@@ -276,7 +278,9 @@ describe('matchRoute', () => {
   });
 
   it.each([
-    '/',
+    '//',
+    '/robots.txt/',
+    '/index.html',
     '/v1',
     '/v1/info/',
     '/v2/info',

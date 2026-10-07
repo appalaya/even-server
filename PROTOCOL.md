@@ -305,6 +305,11 @@ Clients treat `group_blocked` as terminal for that group on that server,
 "refresh `/v1/info` and re-batch", `invalid_envelope` as "quarantine that
 envelope", and 429, 503, 5xx, and network failures as transient.
 
+`GET /` and `GET /robots.txt` are outside the protocol: a server MAY answer
+them with plain text for people and crawlers, or treat them as unknown
+routes. §5's `Cache-Control: no-store` still applies to every response.
+Clients never request them.
+
 ## 8. Invites
 
 ### 8.1 Server URL canonical form

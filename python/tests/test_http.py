@@ -21,12 +21,14 @@ def test_subscriptions_authenticate_then_501(client):
     assert client.get("/v1/info").json()["push"] is False
 
 
-@pytest.mark.parametrize("path", ["/", "/v1", "/v2/info", "/v1/info/", "/v1/groups", "/docs", "/openapi.json",
-                                  f"/v1/groups/{'A' * 43}/events/", f"/v1/groups/{'A' * 43}/other"])
+@pytest.mark.parametrize("path", ["/robots.txt/", "/index.html", "/v1", "/v2/info", "/v1/info/", "/v1/groups", "/docs",
+                                  "/openapi.json", f"/v1/groups/{'A' * 43}/events/", f"/v1/groups/{'A' * 43}/other"])
 def test_unknown_route_is_404(client, path):
     response = client.get(path)
     assert response.status_code == 404
     assert response.json() == {"error": "not_found"}
+    assert response.headers["content-type"] == "application/json; charset=utf-8"
+    assert response.headers["cache-control"] == "no-store"
 
 
 @pytest.mark.parametrize(("method", "path", "allow"), [
@@ -39,6 +41,8 @@ def test_unknown_route_is_404(client, path):
     ("POST", "/v1/groups/{g}", "DELETE"),
     ("GET", "/v1/groups/{g}/subscriptions", "PUT"),
     ("DELETE", "/v1/groups/{g}/subscriptions", "PUT"),
+    ("POST", "/", "GET"),
+    ("DELETE", "/robots.txt", "GET"),
 ])
 def test_wrong_method_is_405(client, method, path, allow):
     response = client.request(method, path.format(g=new_group().id))
@@ -78,6 +82,55 @@ def test_every_response_is_no_store_and_every_error_is_protocol_shaped(make_clie
             body = response.json()
             assert set(body) <= ERROR_KEYS and isinstance(body["error"], str), body
             assert response.headers["content-type"] == "application/json; charset=utf-8"
+
+
+PAGES = {
+    "/": ("Even sync server.\n"
+          "This host stores encrypted group logs it cannot read, for the Even app. Nothing to browse here.\n"
+          "https://github.com/appalaya/even-server\n"),
+    "/robots.txt": "User-agent: *\nDisallow: /\n",
+}
+
+
+@pytest.mark.parametrize(("path", "text"), PAGES.items(), ids=list(PAGES))
+def test_pages_outside_the_protocol_are_plain_text_cacheable_and_never_indexed(client, caplog, path, text):
+    caplog.set_level(logging.INFO)
+    response = client.get(path)
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "text/plain; charset=utf-8"
+    assert response.headers["cache-control"] == "no-store"
+    assert response.headers["x-robots-tag"] == "noindex, nofollow"
+    assert response.content == text.encode()
+    assert [(l["method"], l["route"], l["status"]) for l in _request_lines(caplog)] == [("GET", path, 200)]
+
+
+def test_pages_are_answered_before_any_rate_limit_or_database_read(client, monkeypatch):
+    checked = []
+
+    def refuse(*args, **kwargs) -> int:
+        checked.append(args)
+        return 60
+
+    monkeypatch.setattr(client.app.state.limiter, "check", refuse)
+    monkeypatch.setattr(client.app.state.store, "_conn", None)  # any database read now fails
+    for path in PAGES:
+        assert client.get(path).status_code == 200
+    assert checked == []
+    assert client.get("/v1/info").status_code == 500  # the same patches are in effect there
+
+
+def test_head_on_a_page_is_the_usual_405_and_info_is_unchanged(client):
+    head = client.head("/")
+    assert head.status_code == 405
+    assert head.headers["allow"] == "GET"
+    assert head.headers["cache-control"] == "no-store"
+    assert "x-robots-tag" not in head.headers
+    info = client.get("/v1/info")
+    assert info.status_code == 200
+    assert info.headers["content-type"] == "application/json; charset=utf-8"
+    assert info.headers["cache-control"] == "no-store"
+    assert "x-robots-tag" not in info.headers
+    assert info.json()["protocol"] == [1]
 
 
 def _server_records(caplog):

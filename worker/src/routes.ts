@@ -1,18 +1,18 @@
 /**
- * The HTTP surface (PROTOCOL.md §6). Routing is a handful of comparisons against the path; a router would be the
- * largest dependency in the project (design.md, "The Worker").
+ * The HTTP surface (PROTOCOL.md §6), plus two plain-text pages outside the protocol. Routing is a handful of
+ * comparisons against the path; a router would be the largest dependency in the project (design.md, "The Worker").
  */
 import { authenticate, checkGroupId } from './auth';
 import * as b64 from './b64';
 import * as store from './db';
 import type { Env } from './env';
 import { firstOccurrences, parseAppendBody } from './envelope';
-import { ApiError, invalidRequest, json, noContent } from './http';
+import { ApiError, invalidRequest, json, noContent, page } from './http';
 import { driftFromVars, infoDocument, maxBodyBytes, type Limits } from './limits';
 import { logEvent } from './log';
 import { allow, allowUnits, clientKey, rateLimited, readUnits } from './ratelimit';
 
-export type RouteKind = 'info' | 'events' | 'group' | 'subscriptions';
+export type RouteKind = 'root' | 'robots' | 'info' | 'events' | 'group' | 'subscriptions';
 
 export interface Route {
   kind: RouteKind;
@@ -25,6 +25,9 @@ export interface Route {
 
 /** The route for `pathname`, or undefined (→ 404). Exact matches only: `/v1/info/` is not `/v1/info`. */
 export function matchRoute(pathname: string): Route | undefined {
+  if (pathname === '/') return { kind: 'root', pattern: '/', methods: ['GET'] };
+  if (pathname === '/robots.txt')
+    return { kind: 'robots', pattern: '/robots.txt', methods: ['GET'] };
   if (pathname === '/v1/info') return { kind: 'info', pattern: '/v1/info', methods: ['GET'] };
   const parts = pathname.split('/'); // ['', 'v1', 'groups', '{groupId}', ...]
   if (parts[1] !== 'v1' || parts[2] !== 'groups' || parts[3] === undefined || parts[3] === '')
@@ -65,6 +68,10 @@ export async function handle(
     });
   }
   switch (route.kind) {
+    case 'root':
+      return page(ROOT_TEXT);
+    case 'robots':
+      return page(ROBOTS_TXT);
     case 'info':
       return info(request, env);
     case 'events':
@@ -91,6 +98,21 @@ function corsPreflight(route: Route): Response {
     'Access-Control-Max-Age': '86400',
   });
 }
+
+// ---------- outside the protocol: / and /robots.txt ----------
+
+/**
+ * For whoever finds the bare host: crawlers are asked to stay away, people are told what it is. Generic, because
+ * self-hosters run the same code. Static, so they come before any limiter or D1 read.
+ */
+const ROOT_TEXT = `Even sync server.
+This host stores encrypted group logs it cannot read, for the Even app. Nothing to browse here.
+https://github.com/appalaya/even-server
+`;
+
+const ROBOTS_TXT = `User-agent: *
+Disallow: /
+`;
 
 // ---------- prelude (design.md, "Request handling") ----------
 

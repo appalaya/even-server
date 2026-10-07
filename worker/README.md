@@ -5,6 +5,11 @@ The Worker that runs the public server at `https://sync.even.appalaya.com`, depl
 per group, hands them back in order, and cannot read any of them. It passes the [conformance suite](../conformance/)
 (below).
 
+Outside the protocol it answers two fixed plain-text pages, before any rate limiter or D1 read: `GET /robots.txt`
+(`Disallow: /` for every crawler) and `GET /` (what the host is, with a link to this repository). Both carry
+`X-Robots-Tag: noindex, nofollow` and, like every response, `Cache-Control: no-store`. Every other path outside `/v1`
+is `404 not_found`.
+
 No framework and no runtime dependencies. Dev dependencies are `wrangler`, `typescript`,
 `@cloudflare/workers-types`, `vitest` and `@cloudflare/vitest-pool-workers`. Node 24 or newer.
 

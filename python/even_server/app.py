@@ -1,4 +1,5 @@
-"""The HTTP surface (PROTOCOL.md section 6) as a FastAPI app.
+"""The HTTP surface (PROTOCOL.md section 6) as a FastAPI app, plus two
+plain-text pages outside the protocol (`/`, `/robots.txt`).
 
 Bodies and query strings are parsed by hand rather than by FastAPI models, so
 that validation order and error shapes follow the protocol exactly: every error
@@ -16,7 +17,7 @@ from fastapi.exceptions import RequestValidationError
 from starlette.concurrency import run_in_threadpool
 from starlette.datastructures import MutableHeaders
 from starlette.exceptions import HTTPException as StarletteHTTPException
-from starlette.responses import Response
+from starlette.responses import PlainTextResponse, Response
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from . import __version__, auth, b64, logs
@@ -86,6 +87,15 @@ def create_app(config: Config, *, store: Store | None = None, limiter: RateLimit
         if state.blocked:
             raise ApiError(410, "group_blocked", "this group is blocked on this server")
         return group_id, state, key
+
+    # Outside the protocol, and static: answered before any rate limit or database read.
+    @app.get("/")
+    async def root() -> PlainTextResponse:
+        return _page(ROOT_TEXT)
+
+    @app.get("/robots.txt")
+    async def robots() -> PlainTextResponse:
+        return _page(ROBOTS_TXT)
 
     @app.get("/v1/info")
     async def info(request: Request) -> JSON:
@@ -209,6 +219,25 @@ def _warn_if_arrival_ahead(last_write_at: int, now_ms: int, route: str | None) -
     ahead_ms = last_write_at - now_ms
     if ahead_ms > _ARRIVAL_AHEAD_THRESHOLD_MS:
         logs.log_arrival_ahead(route, ahead_ms)
+
+
+# -- outside the protocol -----------------------------------------------------
+
+# For whoever finds the bare host: crawlers are asked to stay away, people are told what it is. Generic, because
+# self-hosters run the same code. The same bytes as the Worker's (worker/src/routes.ts).
+ROOT_TEXT = (
+    "Even sync server.\n"
+    "This host stores encrypted group logs it cannot read, for the Even app. Nothing to browse here.\n"
+    "https://github.com/appalaya/even-server\n"
+)
+ROBOTS_TXT = "User-agent: *\nDisallow: /\n"
+
+
+def _page(text: str) -> PlainTextResponse:
+    """A fixed plain-text page: no protocol data, and no crawler is to index
+    it. `Cache-Control: no-store` comes from EdgeMiddleware, like every
+    response (PROTOCOL.md section 5)."""
+    return PlainTextResponse(text, headers={"X-Robots-Tag": "noindex, nofollow"})
 
 
 # -- error mapping ------------------------------------------------------------

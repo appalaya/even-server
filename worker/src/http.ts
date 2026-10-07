@@ -4,6 +4,7 @@
  */
 
 export const JSON_TYPE = 'application/json; charset=utf-8';
+export const TEXT_TYPE = 'text/plain; charset=utf-8';
 
 export class ApiError extends Error {
   readonly status: number;
@@ -55,6 +56,16 @@ export function json(body: unknown, status = 200, headers: Record<string, string
 
 export function noContent(headers: Record<string, string> = {}): Response {
   return new Response(null, { status: 204, headers });
+}
+
+/**
+ * A fixed plain-text page outside the protocol (`/`, `/robots.txt`): no protocol data, and no crawler is to index
+ * it. `Cache-Control: no-store` comes from `finalize`, like every response (PROTOCOL.md §5).
+ */
+export function page(text: string): Response {
+  return new Response(text, {
+    headers: { 'Content-Type': TEXT_TYPE, 'X-Robots-Tag': 'noindex, nofollow' },
+  });
 }
 
 /** Headers added to every response. CORS is permissive (§5 MAY): the only credential is a bearer token, never a cookie. */

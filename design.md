@@ -388,6 +388,11 @@ group ids, no IPs.
   against `URL.pathname`; a router would be the largest dependency in the
   project. Unknown route → `404 not_found`; known route, wrong method →
   `405 method_not_allowed`.
+- Outside the protocol, `GET /robots.txt` (`Disallow: /`) and `GET /` (what
+  the host is, with a link to the repository) answer fixed plain text with
+  `X-Robots-Tag: noindex, nofollow` (and `no-store`, like every response),
+  before any limiter or D1 read. The Python reference answers them the same
+  way.
 - `wrangler.jsonc` declares: the D1 binding, four rate limiters, the cron
   trigger, `vars` for every `EVEN_*` value, `compatibility_date`, and
   observability with invocation logs disabled.

@@ -775,7 +775,7 @@ describe('logging', () => {
 });
 
 describe('HTTP surface', () => {
-  it('Cache-Control: no-store and CORS on every response, including 204 and routing errors', async () => {
+  it('Cache-Control: no-store and CORS on every protocol response, including 204 and routing errors', async () => {
     const group = await freshGroup();
     const responses = [
       await call('GET', '/v1/info'),
@@ -821,6 +821,89 @@ describe('HTTP surface', () => {
     );
     const response = await call('GET', `/v1/groups/${encoded}/events`, { token: group.token });
     expect(await body(response)).toMatchObject({ next: 1 });
+  });
+});
+
+describe('outside the protocol: / and /robots.txt', () => {
+  const pages: Array<[path: string, text: string]> = [
+    [
+      '/',
+      'Even sync server.\n' +
+        'This host stores encrypted group logs it cannot read, for the Even app. Nothing to browse here.\n' +
+        'https://github.com/appalaya/even-server\n',
+    ],
+    ['/robots.txt', 'User-agent: *\nDisallow: /\n'],
+  ];
+
+  it.each(pages)(
+    'GET %s: fixed plain text, cacheable for a day, never indexed, with CORS',
+    async (path, text) => {
+      const response = await call('GET', path);
+      expect(response.status).toBe(200);
+      expect(response.headers.get('Content-Type')).toBe('text/plain; charset=utf-8');
+      expect(response.headers.get('Cache-Control')).toBe('no-store');
+      expect(response.headers.get('X-Robots-Tag')).toBe('noindex, nofollow');
+      expect(response.headers.get('Access-Control-Allow-Origin')).toBe('*');
+      expect(response.headers.get('Access-Control-Expose-Headers')).toBe('Retry-After');
+      expect(await response.text()).toBe(text);
+      expect(requestLines().map((l) => [l.method, l.route, l.status])).toEqual([
+        ['GET', path, 200],
+      ]);
+    },
+  );
+
+  it('are answered before any limiter or D1 read', async () => {
+    const refusing = fakeLimiter(false);
+    const failing = {
+      prepare: () => {
+        throw new TypeError('no D1 here');
+      },
+    } as unknown as D1Database;
+    const bindings = {
+      env: {
+        DB: failing,
+        RATE_REQUESTS: refusing,
+        RATE_READS: refusing,
+        RATE_WRITES: refusing,
+        RATE_CREATES: refusing,
+      },
+    };
+    for (const [path] of pages) expect((await call('GET', path, bindings)).status, path).toBe(200);
+    expect(refusing.keys).toEqual([]);
+    // The same bindings refuse /v1/info, so they were in effect.
+    expect((await call('GET', '/v1/info', bindings)).status).toBe(429);
+  });
+
+  it('any other method gets the usual 405; /v1/info and the JSON 404 are unchanged', async () => {
+    const wrong: Array<[method: string, path: string]> = [
+      ['POST', '/'],
+      ['HEAD', '/'],
+      ['DELETE', '/robots.txt'],
+    ];
+    for (const [method, path] of wrong) {
+      const response = await call(method, path);
+      expect(response.status, `${method} ${path}`).toBe(405);
+      expect(response.headers.get('Allow')).toBe('GET');
+      expect(response.headers.get('Cache-Control')).toBe('no-store');
+      expect(response.headers.get('X-Robots-Tag')).toBeNull();
+      expect(await body(response)).toEqual({ error: 'method_not_allowed' });
+    }
+
+    const info = await call('GET', '/v1/info');
+    expect(info.status).toBe(200);
+    expect(info.headers.get('Content-Type')).toBe('application/json; charset=utf-8');
+    expect(info.headers.get('Cache-Control')).toBe('no-store');
+    expect(info.headers.get('X-Robots-Tag')).toBeNull();
+    expect(await body(info)).toMatchObject({ protocol: [1], push: false });
+
+    for (const path of ['/nope', '//', '/robots.txt/', '/index.html', '/v1']) {
+      const response = await call('GET', path);
+      expect(response.status, path).toBe(404);
+      expect(response.headers.get('Content-Type')).toBe('application/json; charset=utf-8');
+      expect(response.headers.get('Cache-Control')).toBe('no-store');
+      expect(response.headers.get('X-Robots-Tag')).toBeNull();
+      expect(await body(response)).toEqual({ error: 'not_found' });
+    }
   });
 });
 
